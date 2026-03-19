@@ -31,7 +31,10 @@ class User extends Authenticatable
         'otp_last_sent_at',
         'role',
         'is_active',
-        'joined_at'
+        'joined_at',
+        'payment_mode',
+        'payroll_no',
+        'payment_mode_effective_from',
     ];
 
     /**
@@ -42,6 +45,13 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'otp_code_hash',
+        'otp_expires_at',
+        'otp_attempts',
+        'otp_last_sent_at',
+        'two_factor_enabled' => 'boolean',
+        'two_factor_confirmed_at' => 'datetime',
+        'two_factor_recovery_codes' => 'array',
     ];
 
     /**
@@ -51,15 +61,32 @@ class User extends Authenticatable
      */
     protected $casts = [
         'email_verified_at' => 'datetime',
+
+        'otp_expires_at' => 'datetime',
+        'otp_last_sent_at' => 'datetime',
+
+        'is_active' => 'boolean',
+        'joined_at' => 'datetime',
     ];
 
-    public function contributions(){
+    public function contributions()
+    {
         return $this->hasMany(Contribution::class);
     }
-    public function loans(){
+    public function loans()
+    {
         return $this->hasMany(Loan::class);
     }
-    public function transactions() { 
-        return $this->hasMany(Transaction::class); }
-
+    public function transactions()
+    {
+        return $this->hasMany(Transaction::class);
+    }
+    public function memberFinancialYears()
+    {
+        return $this->hasMany(\App\Models\MemberFinancialYear::class);
+    }
+    public function beneficiaries()
+    {
+        return $this->hasMany(Beneficiary::class, 'guardian_user_id');
+    }
 }

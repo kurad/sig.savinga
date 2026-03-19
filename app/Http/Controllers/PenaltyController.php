@@ -20,22 +20,45 @@ class PenaltyController extends Controller
         protected PenaltyReportService $reportService
     ) {}
 
+    protected function resolveOwnerFromRequest(Request $request): array
+    {
+        $ownerType = $request->input('owner_type');
+
+        return [
+            'owner_type' => $ownerType,
+            'userId' => $ownerType === 'user' ? $request->integer('user_id') : null,
+            'beneficiaryId' => $ownerType === 'beneficiary' ? $request->integer('beneficiary_id') : null,
+        ];
+    }
+
+    protected function penaltyRelations(): array
+    {
+        return [
+            'user:id,name,email,phone',
+            'beneficiary:id,guardian_user_id,name,relationship',
+            'beneficiary.guardian:id,name,email,phone',
+        ];
+    }
+
     /**
-     * GET /api/penalties?user_id=&status=&source_type=&from=&to=
+     * GET /api/penalties?owner_type=&user_id=&beneficiary_id=&status=&source_type=&from=&to=
      */
     public function index(Request $request)
     {
         $validated = $request->validate([
-            'user_id'     => ['nullable', 'integer', 'exists:users,id'],
-            'status'      => ['nullable', 'in:unpaid,paid,waived'],
+            'owner_type' => ['nullable', 'in:user,beneficiary'],
+            'user_id' => ['nullable', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
+            'status' => ['nullable', 'in:unpaid,paid,waived'],
             'source_type' => ['nullable', 'in:contribution,loan,loan_installment,manual'],
-            'from'        => ['nullable', 'date'],
-            'to'          => ['nullable', 'date'],
-            'perPage'     => ['nullable', 'integer', 'min:5', 'max:100'],
+            'from' => ['nullable', 'date'],
+            'to' => ['nullable', 'date'],
+            'perPage' => ['nullable', 'integer', 'min:5', 'max:100'],
         ]);
+
         $data = $this->reportService->list(
             filters: $validated,
-            perPage: (int) $validated['perPage'] ?? 15
+            perPage: (int) ($validated['perPage'] ?? 15)
         );
 
         return response()->json([
@@ -46,6 +69,7 @@ class PenaltyController extends Controller
 
     /**
      * GET /api/members/{user}/penalties/summary?from=&to=
+     * Kept user-based for compatibility.
      */
     public function memberSummary(Request $request, User $user)
     {
@@ -67,6 +91,11 @@ class PenaltyController extends Controller
             return response()->json(['message' => 'Forbidden'], 403);
         }
     }
+
+    /**
+     * GET /api/members/{user}/penalties?status=&from=&to=
+     * Kept user-based for compatibility.
+     */
     public function memberPenalties(Request $request, User $user)
     {
         $request->validate([
@@ -81,7 +110,7 @@ class PenaltyController extends Controller
                 viewer: $request->user(),
                 member: $user,
                 filters: $request->only(['status', 'from', 'to']),
-                perPage: (int)($request->input('perPage') ?? 15)
+                perPage: (int) ($request->input('perPage') ?? 15)
             );
 
             return response()->json([
@@ -98,17 +127,20 @@ class PenaltyController extends Controller
      */
     public function storeManual(StoreManualPenaltyRequest $request)
     {
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+
         $penalty = $this->penaltyService->manual(
-            memberId: $request->integer('user_id'),
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             amount: (float) $request->input('amount'),
             reason: $request->input('reason'),
-            recordedBy: $request->user()->id,
+            recordedBy: (int) $request->user()->id,
             date: $request->input('date')
         );
 
         return response()->json([
             'message' => 'Penalty created successfully',
-            'data' => $penalty?->load('user:id,name,email,phone'),
+            'data' => $penalty?->load($this->penaltyRelations()),
         ], 201);
     }
 
@@ -120,13 +152,13 @@ class PenaltyController extends Controller
         try {
             $updated = $this->penaltyService->markPaid(
                 penaltyId: $penalty->id,
-                resolvedBy: $request->user()->id,
+                resolvedBy: (int) $request->user()->id,
                 date: $request->input('date')
             );
 
             return response()->json([
                 'message' => 'Penalty marked as paid',
-                'data' => $updated,
+                'data' => $updated->load($this->penaltyRelations()),
             ]);
         } catch (\Exception $e) {
             return response()->json(['message' => $e->getMessage()], 422);
@@ -141,13 +173,13 @@ class PenaltyController extends Controller
         try {
             $updated = $this->penaltyService->waive(
                 penaltyId: $penalty->id,
-                resolvedBy: $request->user()->id,
+                resolvedBy: (int) $request->user()->id,
                 date: $request->input('date')
             );
 
             return response()->json([
                 'message' => 'Penalty waived',
-                'data' => $updated,
+                'data' => $updated->load($this->penaltyRelations()),
             ]);
         } catch (\Exception $e) {
             return response()->json(['message' => $e->getMessage()], 422);

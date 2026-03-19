@@ -11,10 +11,10 @@ class DatabaseSeeder extends Seeder
         $this->call([
             SystemRulesSeeder::class,
             CoreUsersSeeder::class,
-            ProfitCycleSeeder::class,
+            //ProfitCycleSeeder::class,
 
             // Comment out in production
-            DemoMembersSeeder::class,
+            //DemoMembersSeeder::class,
         ]);
     }
 }

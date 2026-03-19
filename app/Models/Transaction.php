@@ -12,6 +12,7 @@ class Transaction extends Model
 
     protected $fillable = [
         'user_id',
+        'beneficiary_id',
         'type',
         'debit',
         'credit',
@@ -25,9 +26,13 @@ class Transaction extends Model
         'debit'  => 'decimal:2',
         'credit' => 'decimal:2',
     ];
-    
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+    public function beneficiary()
+    {
+        return $this->belongsTo(Beneficiary::class);
     }
 }

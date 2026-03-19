@@ -3,8 +3,10 @@
 namespace App\Services;
 
 use App\Models\Expense;
+use App\Models\Transaction;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class ExpenseService
 {
@@ -19,13 +21,28 @@ class ExpenseService
         ?string $category = null,
         ?string $description = null
     ): Expense {
-        return DB::transaction(function () use ($amount, $expenseDate, $recordedBy, $category, $description) {
+        $amount = (float) $amount;
+        if($amount <= 0){
+            throw ValidationException::withMessages(['amount' => ['Amount must be greater than 0.']]);
+        }
+        $expenseDt = Carbon::parse($expenseDate)->startOfDay();
+        return DB::transaction(function () use ($amount, $expenseDt, $recordedBy, $category, $description) {
 
+         // ✅ Lock ledger rows so balance can't change mid-check (prevents race conditions)
+        $credits = (float) Transaction::query()->lockForUpdate()->sum('credit');
+        $debits  = (float) Transaction::query()->lockForUpdate()->sum('debit');
+        $available = $credits - $debits;
+
+        if ($amount > $available) {
+            throw ValidationException::withMessages([
+                'amount' => ["Insufficient funds. Available: " . number_format($available, 0) . " RWF."],
+            ]);
+        }
             $expense = Expense::create([
                 'amount' => $amount,
                 'category' => $category,
                 'description' => $description,
-                'expense_date' => Carbon::parse($expenseDate)->toDateString(),
+                'expense_date' => $expenseDt->toDateString(),
                 'recorded_by' => $recordedBy,
             ]);
 
@@ -35,7 +52,7 @@ class ExpenseService
                 debit: $amount,
                 credit: 0,
                 userId: $recordedBy, // optional: or null if your transactions allow
-                reference: 'Expense ID ' . $expense->id . ($category ? " ({$category})" : ''),
+                reference: 'Expense # ' . $expense->id . ($category ? " ({$category})" : ''),
                 createdBy: $recordedBy,
                 sourceType: 'expense',
                 sourceId: $expense->id

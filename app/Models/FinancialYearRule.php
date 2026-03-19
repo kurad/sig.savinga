@@ -15,6 +15,7 @@ class FinancialYearRule extends Model
         'due_day',
         'grace_days',
         'is_active',
+        'due_month_offset'
     ];
 
     protected $casts = [

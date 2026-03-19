@@ -2,17 +2,65 @@
 
 namespace App\Services;
 
-use Carbon\Carbon;
 use App\Models\Penalty;
 use App\Models\SystemRule;
 use App\Models\GraceWindow;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 
 class PenaltyService
 {
+    protected string $tz = 'Africa/Kigali';
+
     public function __construct(
         protected TransactionService $ledger
     ) {}
+
+    protected function nowTz(): Carbon
+    {
+        return now($this->tz);
+    }
+
+    protected function normalizeDate(?string $date = null, bool $endOfDay = false): Carbon
+    {
+        $d = $date
+            ? Carbon::parse($date, $this->tz)
+            : $this->nowTz();
+
+        return $endOfDay ? $d->copy()->endOfDay() : $d->copy()->startOfDay();
+    }
+
+    protected function validateOwner(?int $userId, ?int $beneficiaryId): void
+    {
+        $hasUser = !is_null($userId);
+        $hasBeneficiary = !is_null($beneficiaryId);
+
+        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
+            throw new InvalidArgumentException(
+                'A penalty must belong to either a user or a beneficiary.'
+            );
+        }
+    }
+
+    protected function ownerPayload(?int $userId, ?int $beneficiaryId): array
+    {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        return [
+            'user_id' => $userId,
+            'beneficiary_id' => $beneficiaryId,
+        ];
+    }
+
+    protected function ownerPenaltyQuery(?int $userId, ?int $beneficiaryId)
+    {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        return Penalty::query()
+            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+    }
 
     protected function isLateContributionPenaltyExempt(string $periodKey, Carbon $paidDate): bool
     {
@@ -23,102 +71,183 @@ class PenaltyService
             ->exists();
     }
 
+    protected function contributionPenaltyRate(): float
+    {
+        $rules = SystemRule::firstOrFail();
+
+        return round((float) (
+            $rules->missed_contribution_penalty_percent
+            ?? $rules->contribution_penalty_percent
+            ?? 0
+        ), 4);
+    }
+
+    protected function loanPenaltyRate(): float
+    {
+        $rules = SystemRule::firstOrFail();
+
+        return round((float) (
+            $rules->late_loan_penalty_percent
+            ?? $rules->loan_penalty_percent
+            ?? 0
+        ), 4);
+    }
+
     /**
      * Late contribution penalty
      */
-    public function contributionLate(int $memberId, int $contributionId, int $recordedBy, string $periodKey, string $paidDate): ?Penalty
-    {
-        $paid = Carbon::parse($paidDate);
+    public function contributionLate(
+        ?int $userId,
+        ?int $beneficiaryId,
+        int $contributionId,
+        int $recordedBy,
+        string $periodKey,
+        string $paidDate,
+        float $principalBase = 0
+    ): ?Penalty {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        $paid = Carbon::parse($paidDate, $this->tz);
         if ($this->isLateContributionPenaltyExempt($periodKey, $paid)) {
             return null;
         }
 
+        $rate = $this->contributionPenaltyRate();
+        if ($rate <= 0) {
+            return null;
+        }
+
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $amount = $this->computeCompoundAmount($baseAmount, $rate);
+
         return $this->apply(
-            memberId: $memberId,
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             sourceType: 'contribution',
             sourceId: $contributionId,
-            amount: (float) SystemRule::firstOrFail()->late_contribution_penalty,
-            reason: 'Late contribution',
-            recordedBy: $recordedBy
+            amount: $amount,
+            reason: $this->cycleReason('Late contribution penalty', $periodKey),
+            recordedBy: $recordedBy,
+            date: $paidDate
         );
     }
 
     /**
      * Missed contribution penalty
      */
-    public function contributionMissed(int $memberId, int $contributionId, int $recordedBy): ?Penalty
-    {
+    public function contributionMissed(
+        ?int $userId,
+        ?int $beneficiaryId,
+        int $contributionId,
+        int $recordedBy,
+        string $periodKey = '',
+        float $principalBase = 0,
+        ?string $date = null
+    ): ?Penalty {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        $rate = $this->contributionPenaltyRate();
+        if ($rate <= 0) {
+            return null;
+        }
+
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $amount = $this->computeCompoundAmount($baseAmount, $rate);
+
         return $this->apply(
-            memberId: $memberId,
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             sourceType: 'contribution',
             sourceId: $contributionId,
-            amount: (float) SystemRule::firstOrFail()->missed_contribution_penalty,
-            reason: 'Missed contribution',
-            recordedBy: $recordedBy
+            amount: $amount,
+            reason: $periodKey
+                ? $this->cycleReason('Missed contribution penalty', $periodKey)
+                : 'Missed contribution penalty',
+            recordedBy: $recordedBy,
+            date: $date
         );
     }
 
     /**
-     * Late loan repayment penalty (legacy / loan-level)
+     * Late loan repayment penalty
      */
-    public function loanLate(int $memberId, int $loanId, int $recordedBy): ?Penalty
-    {
+    public function loanLate(
+        ?int $userId,
+        ?int $beneficiaryId,
+        int $loanId,
+        int $recordedBy,
+        string $periodKey,
+        float $principalBase,
+        ?string $date = null
+    ): ?Penalty {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        $rate = $this->loanPenaltyRate();
+        if ($rate <= 0) {
+            return null;
+        }
+
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $amount = $this->computeCompoundAmount($baseAmount, $rate);
+
         return $this->apply(
-            memberId: $memberId,
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             sourceType: 'loan',
             sourceId: $loanId,
-            amount: (float) SystemRule::firstOrFail()->late_loan_penalty,
-            reason: 'Late loan repayment',
-            recordedBy: $recordedBy
+            amount: $amount,
+            reason: $this->cycleReason('Late loan repayment penalty', $periodKey),
+            recordedBy: $recordedBy,
+            date: $date
         );
     }
 
-    /**
-     * ✅ Late INSTALLMENT penalty (accurate monthly schedule)
-     *
-     * Uses configurable rules:
-     * - system_rules.loan_installment_penalty_type: percent_of_installment | fixed
-     * - system_rules.loan_installment_penalty_value: e.g. 2.5 (%), or fixed RWF
-     *
-     * Fallback:
-     * - if not configured, uses system_rules.late_loan_penalty (your current fixed penalty)
-     */
     public function loanInstallmentLate(
-        int $memberId,
+        ?int $userId,
+        ?int $beneficiaryId,
         int $loanId,
         int $installmentId,
         int $recordedBy,
-        ?float $baseAmount = null,
+        string $periodKey,
+        float $principalBase,
+        ?string $date = null
     ): ?Penalty {
-        $rules = SystemRule::firstOrFail();
-        $fixed = (float)($rules->late_loan_penalty ?? 0);
-        $percent = (float)($rules->late_loan_penalty_percent ?? 0);
+        $this->validateOwner($userId, $beneficiaryId);
 
-
-        $amount = 0;
-
-        if ($percent > 0 && $baseAmount !== null) {
-            $amount = round($baseAmount * ($percent / 100), 2);
-        } else {
-            $amount = $fixed;
+        $rate = $this->loanPenaltyRate();
+        if ($rate <= 0) {
+            return null;
         }
+
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $amount = $this->computeCompoundAmount($baseAmount, $rate);
+
         return $this->apply(
-            memberId: $memberId,
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             sourceType: 'loan_installment',
             sourceId: $installmentId,
-            amount: (float) $amount,
-            reason: "Late loan installment",
+            amount: $amount,
+            reason: $this->cycleReason('Late loan installment penalty', $periodKey),
             recordedBy: $recordedBy,
+            date: $date
         );
     }
 
     /**
-     * Manual penalty (admin-imposed)
+     * Manual penalty
      */
-    public function manual(int $memberId, float $amount, string $reason, int $recordedBy, ?string $date = null): ?Penalty
-    {
+    public function manual(
+        ?int $userId,
+        ?int $beneficiaryId,
+        float $amount,
+        string $reason,
+        int $recordedBy,
+        ?string $date = null
+    ): ?Penalty {
         return $this->apply(
-            memberId: $memberId,
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             sourceType: 'manual',
             sourceId: null,
             amount: $amount,
@@ -129,12 +258,11 @@ class PenaltyService
     }
 
     /**
-     * Mark penalty as PAID (for API)
+     * Mark penalty as paid
      */
     public function markPaid(int $penaltyId, int $resolvedBy, ?string $date = null): Penalty
     {
         return DB::transaction(function () use ($penaltyId, $resolvedBy, $date) {
-
             /** @var Penalty $penalty */
             $penalty = Penalty::lockForUpdate()->findOrFail($penaltyId);
 
@@ -147,19 +275,23 @@ class PenaltyService
                 throw new \Exception('Cannot pay a waived penalty.');
             }
 
-            $paidAt = $date ? Carbon::parse($date)->endOfDay() : now();
+            $paidAt = $date
+                ? Carbon::parse($date, $this->tz)->endOfDay()
+                : $this->nowTz()->copy()->endOfDay();
 
             $penalty->update([
                 'status' => 'paid',
                 'paid_at' => $paidAt,
                 'resolved_by' => $resolvedBy,
+                'updated_at' => $this->nowTz(),
             ]);
 
             $this->ledger->record(
                 type: 'penalty_paid',
                 debit: 0,
                 credit: (float) $penalty->amount,
-                userId: (int) $penalty->user_id,
+                userId: $penalty->user_id,
+                beneficiaryId: $penalty->beneficiary_id,
                 reference: 'Penalty paid ID ' . $penalty->id . ': ' . $penalty->reason,
                 createdBy: $resolvedBy,
                 sourceType: 'penalty',
@@ -171,12 +303,11 @@ class PenaltyService
     }
 
     /**
-     * Waive penalty (for API)
+     * Waive penalty
      */
     public function waive(int $penaltyId, int $resolvedBy, ?string $date = null): Penalty
     {
         return DB::transaction(function () use ($penaltyId, $resolvedBy, $date) {
-
             /** @var Penalty $penalty */
             $penalty = Penalty::lockForUpdate()->findOrFail($penaltyId);
 
@@ -190,65 +321,233 @@ class PenaltyService
                 throw new \Exception('Cannot waive a paid penalty.');
             }
 
-            $resolvedAt = $date ? Carbon::parse($date)->endOfDay() : now();
+            $resolvedAt = $date
+                ? Carbon::parse($date, $this->tz)->endOfDay()
+                : $this->nowTz()->copy()->endOfDay();
 
             $penalty->update([
-                'status'      => 'waived',
-                'paid_at'     => $resolvedAt,
+                'status' => 'waived',
+                'paid_at' => $resolvedAt,
                 'resolved_by' => $resolvedBy,
+                'updated_at' => $this->nowTz(),
             ]);
 
             return $penalty->refresh();
         });
     }
 
-    /* ==========================
-       CORE PENALTY HANDLER
-       ========================== */
-
     protected function apply(
-        int $memberId,
+        ?int $userId,
+        ?int $beneficiaryId,
         string $sourceType,
         ?int $sourceId,
         float $amount,
         string $reason,
         int $recordedBy,
-        ?string $date = null
+        ?string $date = null,
+        string $status = 'unpaid'
     ): ?Penalty {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        $amount = round((float) $amount, 2);
         if ($amount <= 0) {
             return null;
         }
 
         return DB::transaction(function () use (
-            $memberId,
+            $userId,
+            $beneficiaryId,
             $sourceType,
             $sourceId,
             $amount,
             $reason,
             $recordedBy,
-            $date
+            $date,
+            $status
         ) {
             try {
                 $penalty = Penalty::create([
-                    'user_id'     => $memberId,
+                    ...$this->ownerPayload($userId, $beneficiaryId),
                     'source_type' => $sourceType,
-                    'source_id'   => $sourceId,
-                    'amount'      => $amount,
-                    'reason'      => $reason,
-                    'status'      => 'unpaid',
-                    'created_at'  => $date ? Carbon::parse($date)->startOfDay() : now(),
+                    'source_id' => $sourceId,
+                    'amount' => $amount,
+                    'reason' => $reason,
+                    'status' => $status,
+                    'created_at' => $this->normalizeDate($date),
+                    'updated_at' => $this->nowTz(),
+                    'paid_at' => $status === 'paid' ? $this->normalizeDate($date, true) : null,
+                    'resolved_by' => $status === 'paid' ? $recordedBy : null,
                 ]);
             } catch (\Illuminate\Database\QueryException $e) {
                 $code = $e->errorInfo[1] ?? null;
-                if ((int)$code === 1062) {
-                    return Penalty::where('user_id', $memberId)
+
+                if ((int) $code === 1062) {
+                    return $this->ownerPenaltyQuery($userId, $beneficiaryId)
                         ->where('source_type', $sourceType)
                         ->where('source_id', $sourceId)
                         ->where('reason', $reason)
                         ->first();
                 }
+
                 throw $e;
             }
+
+            return $penalty;
+        });
+    }
+
+    /**
+     * Total unpaid penalties for an owner.
+     */
+    public function outstandingAmount(?int $userId, ?int $beneficiaryId): float
+    {
+        return round((float) $this->ownerPenaltyQuery($userId, $beneficiaryId)
+            ->where('status', 'unpaid')
+            ->sum('amount'), 2);
+    }
+
+    protected function compoundBase(?int $userId, ?int $beneficiaryId, float $principalBase): float
+    {
+        $principalBase = round((float) $principalBase, 2);
+
+        $unpaidPenalties = round((float) $this->ownerPenaltyQuery($userId, $beneficiaryId)
+            ->where('status', 'unpaid')
+            ->sum('amount'), 2);
+
+        return round($principalBase + $unpaidPenalties, 2);
+    }
+
+    protected function computeCompoundAmount(float $baseAmount, float $ratePercent): float
+    {
+        return round($baseAmount * ($ratePercent / 100), 2);
+    }
+
+    protected function cycleReason(string $baseReason, string $periodKey): string
+    {
+        return "{$baseReason} - {$periodKey}";
+    }
+
+    public function settleFromPayroll(
+        ?int $userId,
+        ?int $beneficiaryId,
+        float $amount,
+        string $paidDate,
+        int $recordedBy
+    ): array {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        $amount = round((float) $amount, 2);
+        if ($amount <= 0) {
+            return [
+                'paid_total' => 0.0,
+                'remaining_unallocated' => 0.0,
+                'items' => [],
+            ];
+        }
+
+        $paidAt = Carbon::parse($paidDate, $this->tz)->endOfDay();
+
+        return DB::transaction(function () use ($userId, $beneficiaryId, $amount, $paidAt, $recordedBy) {
+            $remaining = round($amount, 2);
+
+            $penalties = $this->ownerPenaltyQuery($userId, $beneficiaryId)
+                ->where('status', 'unpaid')
+                ->orderBy('created_at')
+                ->lockForUpdate()
+                ->get();
+
+            $items = [];
+            $paidTotal = 0.0;
+
+            foreach ($penalties as $p) {
+                if ($remaining <= 0) {
+                    break;
+                }
+
+                $need = round((float) $p->amount, 2);
+                if ($need <= 0) {
+                    continue;
+                }
+
+                if ($remaining + 0.00001 < $need) {
+                    break;
+                }
+
+                $this->markPaid(
+                    penaltyId: (int) $p->id,
+                    resolvedBy: $recordedBy,
+                    date: $paidAt->toDateString()
+                );
+
+                $items[] = [
+                    'penalty_id' => (int) $p->id,
+                    'amount' => $need,
+                    'reason' => (string) $p->reason,
+                ];
+
+                $remaining = round($remaining - $need, 2);
+                $paidTotal = round($paidTotal + $need, 2);
+            }
+
+            return [
+                'paid_total' => $paidTotal,
+                'remaining_unallocated' => $remaining,
+                'items' => $items,
+            ];
+        });
+    }
+
+    public function createAndMarkPaid(
+        ?int $userId,
+        ?int $beneficiaryId,
+        string $sourceType,
+        ?int $sourceId,
+        float $amount,
+        string $reason,
+        int $recordedBy,
+        string $paidDate
+    ): ?Penalty {
+        $this->validateOwner($userId, $beneficiaryId);
+
+        if ($amount <= 0) {
+            return null;
+        }
+
+        return DB::transaction(function () use (
+            $userId,
+            $beneficiaryId,
+            $sourceType,
+            $sourceId,
+            $amount,
+            $reason,
+            $recordedBy,
+            $paidDate
+        ) {
+            $penalty = Penalty::create([
+                ...$this->ownerPayload($userId, $beneficiaryId),
+                'source_type' => $sourceType,
+                'source_id' => $sourceId,
+                'amount' => round((float) $amount, 2),
+                'reason' => $reason,
+                'status' => 'paid',
+                'created_at' => Carbon::parse($paidDate, $this->tz)->startOfDay(),
+                'updated_at' => $this->nowTz(),
+                'paid_at' => Carbon::parse($paidDate, $this->tz)->endOfDay(),
+                'resolved_by' => $recordedBy,
+            ]);
+
+            $this->ledger->record(
+                type: 'penalty_paid',
+                debit: 0,
+                credit: (float) $penalty->amount,
+                userId: $penalty->user_id,
+                beneficiaryId: $penalty->beneficiary_id,
+                reference: 'Penalty paid ID ' . $penalty->id . ': ' . $penalty->reason,
+                createdBy: $recordedBy,
+                sourceType: 'penalty',
+                sourceId: (int) $penalty->id
+            );
+
             return $penalty;
         });
     }

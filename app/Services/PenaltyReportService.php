@@ -4,29 +4,77 @@ namespace App\Services;
 
 use App\Models\User;
 use App\Models\Penalty;
-use Illuminate\Auth\AuthenticationException;
+use App\Models\Beneficiary;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Auth\Access\AuthorizationException;
 
 class PenaltyReportService
 {
+    protected function penaltyRelations(): array
+    {
+        return [
+            'user:id,name,email,phone',
+            'beneficiary:id,guardian_user_id,name,relationship',
+            'beneficiary.guardian:id,name,email,phone',
+        ];
+    }
+
+    protected function applyOwnerFilter(Builder $query, ?int $userId, ?int $beneficiaryId): Builder
+    {
+        return $query
+            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+    }
+
+    protected function validateOwner(?int $userId, ?int $beneficiaryId): void
+    {
+        $hasUser = !is_null($userId);
+        $hasBeneficiary = !is_null($beneficiaryId);
+
+        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
+            throw new \InvalidArgumentException(
+                'Penalty report must belong to either a user or a beneficiary.'
+            );
+        }
+    }
+
     /**
      * List penalties with filters.
-     * Filters: user_id, status, source_type, from, to
+     * Filters: owner_type, user_id, beneficiary_id, status, source_type, from, to
      */
     public function list(array $filters, int $perPage = 15)
     {
-        $query = Penalty::query()->with(['user:id,name,email,phone']);
+        $ownerType = $filters['owner_type'] ?? null;
+        $userId = !empty($filters['user_id']) ? (int) $filters['user_id'] : null;
+        $beneficiaryId = !empty($filters['beneficiary_id']) ? (int) $filters['beneficiary_id'] : null;
 
-        if (!empty($filters['user_id'])) {
-            $query->where('user_id', (int) $filters['user_id']);
+        $query = Penalty::query()->with($this->penaltyRelations());
+
+        if ($ownerType === 'user') {
+            $query->whereNotNull('user_id');
+            if ($userId) {
+                $query->where('user_id', $userId);
+            }
+        } elseif ($ownerType === 'beneficiary') {
+            $query->whereNotNull('beneficiary_id');
+            if ($beneficiaryId) {
+                $query->where('beneficiary_id', $beneficiaryId);
+            }
+        } else {
+            if ($userId) {
+                $query->where('user_id', $userId);
+            }
+            if ($beneficiaryId) {
+                $query->where('beneficiary_id', $beneficiaryId);
+            }
         }
 
         if (!empty($filters['status'])) {
-            $query->where('status', $filters['status']); // unpaid|paid|waived
+            $query->where('status', $filters['status']);
         }
 
         if (!empty($filters['source_type'])) {
-            $query->where('source_type', $filters['source_type']); // contribution|loan|manual
+            $query->where('source_type', $filters['source_type']);
         }
 
         if (!empty($filters['from'])) {
@@ -39,11 +87,16 @@ class PenaltyReportService
 
         return $query->orderByDesc('created_at')->paginate($perPage);
     }
+
+    /**
+     * User-based penalties list kept for compatibility.
+     */
     public function memberPenalties(User $viewer, User $member, array $filters, int $perPage = 15)
     {
         $this->authorizeViewer($viewer, $member);
 
         $q = Penalty::query()
+            ->with($this->penaltyRelations())
             ->where('user_id', $member->id)
             ->orderByDesc('created_at');
 
@@ -67,17 +120,65 @@ class PenaltyReportService
     }
 
     /**
-     * Member penalties summary (with authorization).
-     * Returns totals by status + counts.
+     * User-based summary kept for compatibility.
      */
     public function memberSummary(User $viewer, User $member, ?string $from = null, ?string $to = null): array
     {
-        $this->authorizeViewer($viewer, $member);
+        return $this->ownerSummary(
+            viewer: $viewer,
+            userId: (int) $member->id,
+            beneficiaryId: null,
+            from: $from,
+            to: $to
+        );
+    }
 
-        $q = Penalty::query()->where('user_id', $member->id);
+    /**
+     * Generic owner summary for user or beneficiary.
+     */
+    public function ownerSummary($viewer, ?int $userId, ?int $beneficiaryId, ?string $from = null, ?string $to = null): array
+    {
+        $this->validateOwner($userId, $beneficiaryId);
 
-        if ($from) $q->whereDate('created_at', '>=', $from);
-        if ($to)   $q->whereDate('created_at', '<=', $to);
+        if (!is_null($beneficiaryId)) {
+            $beneficiary = Beneficiary::with('guardian:id,name,email,phone')->findOrFail($beneficiaryId);
+            $this->authorizeBeneficiaryViewer($viewer, $beneficiary);
+
+            $ownerMeta = [
+                'owner_type' => 'beneficiary',
+                'beneficiary' => [
+                    'id' => $beneficiary->id,
+                    'name' => $beneficiary->name,
+                    'relationship' => $beneficiary->relationship,
+                ],
+                'guardian' => $beneficiary->guardian
+                    ? $beneficiary->guardian->only(['id', 'name', 'email', 'phone'])
+                    : null,
+            ];
+        } else {
+            $member = User::findOrFail($userId);
+            $this->authorizeViewer($viewer, $member);
+
+            $ownerMeta = [
+                'owner_type' => 'user',
+                'member' => [
+                    'id' => $member->id,
+                    'name' => $member->name,
+                    'email' => $member->email,
+                    'phone' => $member->phone,
+                ],
+            ];
+        }
+
+        $q = $this->applyOwnerFilter(Penalty::query(), $userId, $beneficiaryId);
+
+        if ($from) {
+            $q->whereDate('created_at', '>=', $from);
+        }
+
+        if ($to) {
+            $q->whereDate('created_at', '<=', $to);
+        }
 
         $totals = (clone $q)->selectRaw('
             COALESCE(SUM(amount),0) as total_amount,
@@ -101,16 +202,12 @@ class PenaltyReportService
             ->get();
 
         $latest = (clone $q)
+            ->with($this->penaltyRelations())
             ->orderByDesc('created_at')
-            ->first(['id', 'source_type', 'source_id', 'amount', 'reason', 'status', 'created_at', 'paid_at']);
+            ->first(['id', 'user_id', 'beneficiary_id', 'source_type', 'source_id', 'amount', 'reason', 'status', 'created_at', 'paid_at']);
 
         return [
-            'member' => [
-                'id' => $member->id,
-                'name' => $member->name,
-                'email' => $member->email,
-                'phone' => $member->phone,
-            ],
+            ...$ownerMeta,
             'filters' => [
                 'from' => $from,
                 'to' => $to,
@@ -128,13 +225,15 @@ class PenaltyReportService
                     'waived' => (int) ($totals->waived_count ?? 0),
                     'total_records' => (int) ($totals->total_records ?? 0),
                 ],
-                'by_source_type' => $bySource->map(fn($row) => [
+                'by_source_type' => $bySource->map(fn ($row) => [
                     'source_type' => $row->source_type,
                     'total_amount' => (float) $row->total_amount,
                     'total_records' => (int) $row->total_records,
                 ])->values(),
                 'latest_penalty' => $latest ? [
                     'id' => $latest->id,
+                    'user_id' => $latest->user_id,
+                    'beneficiary_id' => $latest->beneficiary_id,
                     'source_type' => $latest->source_type,
                     'source_id' => $latest->source_id,
                     'amount' => (float) $latest->amount,
@@ -146,7 +245,6 @@ class PenaltyReportService
             ],
         ];
     }
-    
 
     protected function authorizeViewer(User $viewer, User $member): void
     {
@@ -154,6 +252,16 @@ class PenaltyReportService
         $isSelf = (int) $viewer->id === (int) $member->id;
 
         if (!$isPrivileged && !$isSelf) {
+            throw new AuthorizationException('Forbidden');
+        }
+    }
+
+    protected function authorizeBeneficiaryViewer(User $viewer, Beneficiary $beneficiary): void
+    {
+        $isPrivileged = in_array($viewer->role, ['admin', 'treasurer'], true);
+        $isGuardian = (int) $viewer->id === (int) $beneficiary->guardian_user_id;
+
+        if (!$isPrivileged && !$isGuardian) {
             throw new AuthorizationException('Forbidden');
         }
     }

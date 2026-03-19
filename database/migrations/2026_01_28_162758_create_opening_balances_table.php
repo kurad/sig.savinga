@@ -14,6 +14,7 @@ return new class extends Migration
             $table->id();
 
             $table->unsignedBigInteger('user_id');
+            $table->unsignedBigInteger('beneficiary_id')->nullable();
             $table->string('as_of_period', 7); // YYYY-MM
             $table->decimal('amount', 12, 2)->default(0);
 
@@ -27,43 +28,14 @@ return new class extends Migration
 
             $table->timestamps();
 
-            $table->unique('user_id'); // one opening balance per member
+            $table->unique(['user_id', 'as_of_period']); // one opening balance per member
             $table->index(['as_of_period']);
+            $table->index(['user_id', 'beneficiary_id']);
         });
-
-        // 2) Extend transactions.type enum to include opening_balance
-        // Your schema shows transactions.type enum currently (contribution, loan_disbursement, loan_repayment, penalty, profit, penalty_paid, penalty_waived) :contentReference[oaicite:2]{index=2}
-        DB::statement("
-            ALTER TABLE transactions
-            MODIFY COLUMN type ENUM(
-                'contribution',
-                'loan_disbursement',
-                'loan_repayment',
-                'penalty',
-                'profit',
-                'penalty_paid',
-                'penalty_waived',
-                'opening_balance'
-            ) NOT NULL
-        ");
     }
 
     public function down(): void
     {
-        // revert enum (remove opening_balance)
-        DB::statement("
-            ALTER TABLE transactions
-            MODIFY COLUMN type ENUM(
-                'contribution',
-                'loan_disbursement',
-                'loan_repayment',
-                'penalty',
-                'profit',
-                'penalty_paid',
-                'penalty_waived'
-            ) NOT NULL
-        ");
-
         Schema::dropIfExists('opening_balances');
     }
 };

@@ -12,6 +12,7 @@ class ContributionCommitment extends Model
 
     protected $fillable = [
         'user_id',
+        'beneficiary_id',
         'amount',
         'cycle_start_period',
         'cycle_end_period',

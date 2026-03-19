@@ -6,30 +6,66 @@ use App\Models\User;
 use App\Models\Penalty;
 use App\Models\Transaction;
 use App\Models\Contribution;
+use App\Models\Beneficiary;
 use Illuminate\Support\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 
 class ContributionReportService
 {
+    protected string $tz = 'Africa/Kigali';
+
+    protected function applyOwnerFilter(Builder $query, ?int $userId, ?int $beneficiaryId): Builder
+    {
+        return $query
+            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+    }
+
+    protected function contributionRelations(): array
+    {
+        return [
+            'user:id,name,email,phone',
+            'beneficiary:id,guardian_user_id,name,relationship',
+            'beneficiary.guardian:id,name,email,phone',
+        ];
+    }
+
     /**
      * List contributions with filters.
      */
     public function list(array $filters, int $perPage = 15)
     {
-        $query = Contribution::query()->with(['user:id,name,email,phone']);
+        $ownerType = $filters['owner_type'] ?? null;
+        $userId = !empty($filters['user_id']) ? (int) $filters['user_id'] : null;
+        $beneficiaryId = !empty($filters['beneficiary_id']) ? (int) $filters['beneficiary_id'] : null;
 
-        if (!empty($filters['user_id'])) {
-            $query->where('user_id', (int) $filters['user_id']);
+        $query = Contribution::query()->with($this->contributionRelations());
+
+        if ($ownerType === 'user') {
+            $query->whereNotNull('user_id');
+            if ($userId) {
+                $query->where('user_id', $userId);
+            }
+        } elseif ($ownerType === 'beneficiary') {
+            $query->whereNotNull('beneficiary_id');
+            if ($beneficiaryId) {
+                $query->where('beneficiary_id', $beneficiaryId);
+            }
+        } else {
+            if ($userId) {
+                $query->where('user_id', $userId);
+            }
+            if ($beneficiaryId) {
+                $query->where('beneficiary_id', $beneficiaryId);
+            }
         }
 
         if (!empty($filters['status'])) {
             $query->where('status', $filters['status']);
         }
+
         if (!empty($filters['period'])) {
             $query->where('period_key', $filters['period']);
-        } else {
-            if (!empty($filters['from'])) $query->whereDate('expected_date', '>=', $filters['from']);
-            if (!empty($filters['to']))   $query->whereDate('expected_date', '<=', $filters['to']);
         }
 
         if (!empty($filters['from'])) {
@@ -44,126 +80,74 @@ class ContributionReportService
     }
 
     /**
-     * Member contribution summary (with auth).
+     * Old user-only summary kept for compatibility.
      */
-    public function memberSummary_old(User $viewer, User $member, ?string $from = null, ?string $to = null): array
+    public function memberSummary(User $viewer, User $member, ?string $from, ?string $to): array
     {
-        // ✅ Enforce "self" unless admin/treasurer
-        $allowedRoles = ['admin', 'treasurer'];
-        $isSelf = (int) $viewer->id === (int) $member->id;
-
-        if (!$isSelf && !in_array($viewer->role, $allowedRoles, true)) {
-            throw new \Exception('Forbidden');
-        }
-
-        // Date window (defaults)
-        $fromDate = $from ? Carbon::parse($from)->startOfDay() : now()->startOfMonth()->startOfDay();
-        $toDate   = $to   ? Carbon::parse($to)->endOfDay()     : now()->endOfDay();
-
-        // -----------------------------
-        // 1) Totals from LEDGER (truth)
-        // -----------------------------
-        $totalContributed = (float) Transaction::where('user_id', $member->id)
-            ->where('type', 'contribution')
-            ->whereBetween('created_at', [$fromDate, $toDate])
-            ->sum('credit');
-
-        // Optional: penalties related to contributions (if you post them to ledger as type='penalty')
-        // If you want ONLY penalties originating from contributions, you need to filter by source_type/source_id.
-        // Here we compute penalties in period from penalties table by source_type='contribution'.
-        $totalPenaltiesOnContributions = (float) \App\Models\Penalty::where('user_id', $member->id)
-            ->where('source_type', 'contribution')
-            ->whereBetween('created_at', [$fromDate, $toDate])
-            ->sum('amount');
-
-        // -----------------------------
-        // 2) Envelope rows for TABLE
-        // -----------------------------
-        // Choose filter column: paid_date if you want "payments in window",
-        // expected_date if you want "months due in window".
-        // Your UI uses From/To as general period; using expected_date matches "compliance history".
-        $contribQuery = Contribution::query()
-            ->where('user_id', $member->id)
-            ->whereBetween('expected_date', [$fromDate->toDateString(), $toDate->toDateString()])
-            ->orderByDesc('expected_date');
-
-        $contributions = $contribQuery->get();
-
-        $counts = [
-            'paid' => (int) $contributions->where('status', 'paid')->count(),
-            'late' => (int) $contributions->where('status', 'late')->count(),
-            'missed' => (int) $contributions->where('status', 'missed')->count(),
-            'total_records' => (int) $contributions->count(),
-        ];
-
-        $avg = $counts['total_records'] > 0
-            ? (float) ($contributions->sum('amount') / $counts['total_records'])
-            : 0;
-
-        // last contribution = latest envelope with paid_date not null (or latest expected)
-        $last = Contribution::where('user_id', $member->id)
-            ->orderByDesc('paid_date')
-            ->orderByDesc('expected_date')
-            ->first();
-
-        return [
-            'member' => $member->only(['id', 'name', 'email', 'phone']),
-            'filters' => [
-                'from' => $fromDate->toDateString(),
-                'to'   => $toDate->toDateString(),
-            ],
-            'summary' => [
-                // ✅ ledger-based (matches Statement)
-                'total_contributed' => $totalContributed,
-                'total_penalties_on_contributions' => $totalPenaltiesOnContributions,
-
-                // envelope-based compliance stats
-                'counts' => $counts,
-                'average_contribution' => round($avg, 2),
-                'last_contribution' => $last ? [
-                    'id' => $last->id,
-                    'period_key' => $last->period_key ?? null,
-                    'amount' => (float) $last->amount,
-                    'expected_date' => optional($last->expected_date)->toDateString(),
-                    'paid_date' => $last->paid_date ? Carbon::parse($last->paid_date)->toDateString() : null,
-                    'status' => $last->status,
-                    'penalty_amount' => (float) ($last->penalty_amount ?? 0),
-                ] : null,
-            ],
-
-            // ✅ FRONTEND expects this key
-            'contributions' => $contributions->map(function ($c) {
-                return [
-                    'id' => $c->id,
-                    'period_key' => $c->period_key ?? null,
-                    'expected_date' => optional($c->expected_date)->toDateString(),
-                    'paid_date' => $c->paid_date ? Carbon::parse($c->paid_date)->toDateString() : null,
-                    'amount' => (float) $c->amount,
-                    'status' => $c->status,
-                    'penalty_amount' => (float) ($c->penalty_amount ?? 0),
-                ];
-            })->values(),
-        ];
+        return $this->ownerSummary(
+            viewer: $viewer,
+            userId: (int) $member->id,
+            beneficiaryId: null,
+            from: $from,
+            to: $to
+        );
     }
 
-    public function memberSummary($viewer, $member, ?string $from, ?string $to): array
+    /**
+     * Owner-aware summary for either user or beneficiary.
+     */
+    public function ownerSummary($viewer, ?int $userId, ?int $beneficiaryId, ?string $from, ?string $to): array
     {
-        // (keep your "Forbidden" checks here)
+        $this->validateOwner($userId, $beneficiaryId);
 
-        $fromDate = $from ? Carbon::parse($from)->startOfDay() : null;
-        $toDate   = $to ? Carbon::parse($to)->endOfDay() : null;
+        $allowedRoles = ['admin', 'treasurer'];
 
-        $base = Contribution::query()
-            ->where('user_id', $member->id)
+        if ($beneficiaryId) {
+            $beneficiary = Beneficiary::with('guardian:id,name,email,phone')->findOrFail($beneficiaryId);
+
+            $isSelf = (int) $viewer->id === (int) $beneficiary->guardian_user_id;
+            if (!$isSelf && !in_array($viewer->role, $allowedRoles, true)) {
+                throw new \Exception('Forbidden');
+            }
+
+            $ownerMeta = [
+                'owner_type' => 'beneficiary',
+                'beneficiary' => [
+                    'id' => $beneficiary->id,
+                    'name' => $beneficiary->name,
+                    'relationship' => $beneficiary->relationship,
+                ],
+                'guardian' => $beneficiary->guardian
+                    ? $beneficiary->guardian->only(['id', 'name', 'email', 'phone'])
+                    : null,
+            ];
+        } else {
+            $member = User::findOrFail($userId);
+
+            $isSelf = (int) $viewer->id === (int) $member->id;
+            if (!$isSelf && !in_array($viewer->role, $allowedRoles, true)) {
+                throw new \Exception('Forbidden');
+            }
+
+            $ownerMeta = [
+                'owner_type' => 'user',
+                'member' => $member->only(['id', 'name', 'email', 'phone']),
+            ];
+        }
+
+        $today = now($this->tz)->startOfDay();
+
+        $fromDate = $from ? Carbon::parse($from, $this->tz)->startOfDay() : null;
+        $toDate   = $to   ? Carbon::parse($to, $this->tz)->endOfDay() : null;
+
+        $base = $this->applyOwnerFilter(Contribution::query(), $userId, $beneficiaryId)
+            ->with($this->contributionRelations())
             ->orderByDesc('period_key');
 
         if ($fromDate && $toDate) {
             $base->where(function (Builder $q) use ($fromDate, $toDate) {
-                // paid/late → paid_date
                 $q->whereIn('status', ['paid', 'late'])
                     ->whereBetween('paid_date', [$fromDate, $toDate])
-
-                    // missed → expected_date
                     ->orWhere(function (Builder $q2) use ($fromDate, $toDate) {
                         $q2->where('status', 'missed')
                             ->whereBetween('expected_date', [$fromDate, $toDate]);
@@ -171,27 +155,42 @@ class ContributionReportService
             });
         } elseif ($fromDate) {
             $base->where(function (Builder $q) use ($fromDate) {
-                $q->whereIn('status', ['paid', 'late'])->whereDate('paid_date', '>=', $fromDate)
+                $q->whereIn('status', ['paid', 'late'])
+                    ->whereDate('paid_date', '>=', $fromDate)
                     ->orWhere(function (Builder $q2) use ($fromDate) {
-                        $q2->where('status', 'missed')->whereDate('expected_date', '>=', $fromDate);
+                        $q2->where('status', 'missed')
+                            ->whereDate('expected_date', '>=', $fromDate);
                     });
             });
         } elseif ($toDate) {
             $base->where(function (Builder $q) use ($toDate) {
-                $q->whereIn('status', ['paid', 'late'])->whereDate('paid_date', '<=', $toDate)
+                $q->whereIn('status', ['paid', 'late'])
+                    ->whereDate('paid_date', '<=', $toDate)
                     ->orWhere(function (Builder $q2) use ($toDate) {
-                        $q2->where('status', 'missed')->whereDate('expected_date', '<=', $toDate);
+                        $q2->where('status', 'missed')
+                            ->whereDate('expected_date', '<=', $toDate);
                     });
             });
         }
 
         $contributions = $base->get();
 
-        // ✅ counts now reflect what’s in the table
+        $contributions = $contributions->map(function ($c) use ($today) {
+            if ($c->status === 'missed' && $c->expected_date) {
+                $expected = Carbon::parse($c->expected_date, $this->tz)->startOfDay();
+                if ($expected->gt($today)) {
+                    $c->status = 'pending';
+                    $c->penalty_amount = 0;
+                }
+            }
+            return $c;
+        });
+
         $counts = [
             'paid' => $contributions->where('status', 'paid')->count(),
             'late' => $contributions->where('status', 'late')->count(),
             'missed' => $contributions->where('status', 'missed')->count(),
+            'pending' => $contributions->where('status', 'pending')->count(),
             'total_records' => $contributions->count(),
         ];
 
@@ -199,24 +198,47 @@ class ContributionReportService
             ->whereIn('status', ['paid', 'late'])
             ->sum('amount');
 
-        $last = Contribution::where('user_id', $member->id)
+        $paidLateCount = $counts['paid'] + $counts['late'];
+
+        $last = $this->applyOwnerFilter(Contribution::query(), $userId, $beneficiaryId)
             ->whereIn('status', ['paid', 'late'])
             ->orderByDesc('paid_date')
             ->first();
 
+        $totalPenaltiesOnContributions = (float) $this->applyOwnerFilter(Penalty::query(), $userId, $beneficiaryId)
+            ->where('source_type', 'contribution')
+            ->sum('amount');
+
+        $ledgerTotalContributed = (float) $this->applyOwnerFilter(Transaction::query(), $userId, $beneficiaryId)
+            ->where('type', 'contribution')
+            ->sum('credit');
+
         return [
-            'member' => $member->only(['id', 'name', 'email', 'phone']),
+            ...$ownerMeta,
             'filters' => ['from' => $from, 'to' => $to],
             'summary' => [
                 'total_contributed' => $totalContributed,
-                'total_penalties_on_contributions' => (float) $contributions->sum('penalty_amount'),
+                'ledger_total_contributed' => $ledgerTotalContributed,
+                'total_penalties_on_contributions' => $totalPenaltiesOnContributions,
                 'counts' => $counts,
-                'average_contribution' => $counts['total_records'] > 0
-                    ? round($totalContributed / max(1, ($counts['paid'] + $counts['late'])), 2)
+                'average_contribution' => $paidLateCount > 0
+                    ? round($totalContributed / $paidLateCount, 2)
                     : 0,
                 'last_contribution' => $last,
             ],
             'contributions' => $contributions->values(),
         ];
+    }
+
+    protected function validateOwner(?int $userId, ?int $beneficiaryId): void
+    {
+        $hasUser = !is_null($userId);
+        $hasBeneficiary = !is_null($beneficiaryId);
+
+        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
+            throw new \InvalidArgumentException(
+                'Summary must belong to either a user or a beneficiary.'
+            );
+        }
     }
 }

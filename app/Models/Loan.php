@@ -12,6 +12,8 @@ class Loan extends Model
     use HasFactory;
     protected $fillable = [
         'user_id',
+        'beneficiary_id',
+        'base_loan_id',
         'principal',
         'interest_rate',
         'interest_basis',
@@ -22,6 +24,8 @@ class Loan extends Model
         'issued_date',
         'due_date',
         'status',
+        'repayment_mode',
+        'monthly_installment',
         'approved_by',
         'rate_set_by',
         'rate_set_at',
@@ -37,9 +41,9 @@ class Loan extends Model
         'interest_rate' => 'decimal:2',
         'interest_amount' => 'decimal:2',
         'total_payable' => 'decimal:2',
+        'base_loan_id' => 'integer',
+        'monthly_installment' => 'decimal:2',
     ];
-
-
     public function user()
     {
         return $this->belongsTo(User::class);
@@ -113,6 +117,18 @@ class Loan extends Model
     }
     public function nextUnpaidInstallment()
     {
-        return $this->installments()->where('status', 'unpaid')->orderBy('installment_no')->first();
+        return $this->installments()->whereIn('status', ['unpaid', 'partial'])->orderBy('installment_no')->first();
+    }
+    public function baseLoan()
+    {
+        return $this->belongsTo(self::class, 'base_loan_id');
+    }
+    public function topUps()
+    {
+        return $this->hasMany(self::class, 'base_loan_id')->orderBy('created_at');
+    }
+    public function beneficiary()
+    {
+        return $this->belongsTo(Beneficiary::class);
     }
 }

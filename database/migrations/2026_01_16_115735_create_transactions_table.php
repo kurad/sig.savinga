@@ -14,7 +14,10 @@ return new class extends Migration
         Schema::create('transactions', function (Blueprint $table) {
             $table->id();
             $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete();
+            $table->foreignId('beneficiary_id')->nullable()->constrained('beneficiaries')->nullOnDelete();
             $table->enum('type', [
+                'opening_balance',
+                'opening_loan',
                 'contribution',
                 'loan_disbursement',
                 'loan_repayment',
@@ -22,7 +25,14 @@ return new class extends Migration
                 'profit',
                 'penalty_paid',
                 'penalty_waived',
-                'expense'
+                'loan_interest_deducted',
+                'expense',
+                'contribution_reversal',
+                'penalty_reversal',
+                'investment',
+                'investment_sale',
+                'registration_fee',
+                
             ]);
             $table->decimal('debit', 10, 2)->default(0);
             $table->decimal('credit', 10, 2)->default(0);
@@ -32,7 +42,7 @@ return new class extends Migration
             $table->foreignId('created_by')->constrained('users');
 
             $table->index(['source_type', 'source_id']);
-            $table->index(['user_id', 'type', 'created_at']);
+            $table->index(['user_id', 'type', 'created_at', 'beneficiary_id']);
             $table->timestamps();
         });
     }

@@ -15,7 +15,7 @@ return new class extends Migration
             $table->id();
 
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
-
+            $table->foreignId('beneficiary_id')->nullable()->constrained('beneficiaries')->nullOnDelete();
             // The member's committed monthly amount (>= min)
             $table->decimal('amount', 12, 2);
 
@@ -33,11 +33,11 @@ return new class extends Migration
 
             $table->timestamps();
 
-            $table->index(['user_id', 'status']);
+            $table->index(['user_id', 'beneficiary_id', 'status']);
             $table->index(['cycle_start_period', 'cycle_end_period'], 'cc_cycle_period_idx');
 
             // ✅ prevent duplicate cycle rows per member
-            $table->unique(['user_id', 'cycle_start_period', 'cycle_end_period'], 'uniq_commitment_user_cycle');
+            $table->unique(['user_id', 'beneficiary_id', 'cycle_start_period', 'cycle_end_period'], 'uniq_commitment_user_cycle');
         });
     }
 

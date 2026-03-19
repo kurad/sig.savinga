@@ -9,6 +9,7 @@ class Penalty extends Model
 {
     protected $fillable = [
         'user_id',
+        'beneficiary_id',
         'source_type',
         'source_id',
         'amount',
@@ -36,5 +37,9 @@ class Penalty extends Model
     public function resolvedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'resolved_by');
+    }
+    public function beneficiary()
+    {
+        return $this->belongsTo(Beneficiary::class);
     }
 }

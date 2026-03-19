@@ -8,6 +8,7 @@ class OpeningBalance extends Model
 {
     protected $fillable = [
         'user_id',
+        'beneficiary_id',
         'as_of_period',
         'amount',
         'note',

@@ -4,13 +4,12 @@ namespace App\Http\Controllers;
 
 use Carbon\Carbon;
 use App\Models\User;
-use App\Models\Penalty;
 use App\Models\SystemRule;
 use App\Models\Contribution;
 use Illuminate\Http\Request;
 use App\Models\OpeningBalance;
-use App\Services\CommitmentService;
 use App\Http\Controllers\Controller;
+use App\Services\CommitmentService;
 use App\Services\ContributionService;
 use App\Services\ContributionReportService;
 use App\Http\Requests\Contributions\StoreContributionRequest;
@@ -24,85 +23,134 @@ class ContributionController extends Controller
         protected ContributionService $contributionService,
         protected ContributionReportService $reportService,
         protected CommitmentService $commitmentService,
-
     ) {}
 
+    protected function resolveOwnerFromRequest(Request $request): array
+    {
+        $ownerType = $request->input('owner_type');
+
+        return [
+            'owner_type' => $ownerType,
+            'userId' => $ownerType === 'user' ? $request->integer('user_id') : null,
+            'beneficiaryId' => $ownerType === 'beneficiary' ? $request->integer('beneficiary_id') : null,
+        ];
+    }
+
+    protected function contributionRelations(): array
+    {
+        return [
+            'user:id,name,email,phone',
+            'beneficiary:id,guardian_user_id,name,relationship',
+            'beneficiary.guardian:id,name,email,phone',
+        ];
+    }
+
     /**
-     * List contributions (filters supported)
-     * GET /api/contributions?user_id=&from=&to=&status=
+     * List contributions
+     * GET /api/contributions?owner_type=&user_id=&beneficiary_id=&status=&period=&from=&to=
      */
     public function index(Request $request)
     {
         $data = $this->reportService->list(
             filters: $request->only([
+                'owner_type',
                 'user_id',
+                'beneficiary_id',
                 'status',
                 'period',
                 'from',
-                'to'
+                'to',
             ]),
             perPage: 15
         );
 
         return response()->json($data);
     }
+
     /**
      * Record contribution
      * POST /api/contributions
      */
     public function store(StoreContributionRequest $request)
     {
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+
         $expectedDate = $request->input('expected_date');
         if ($expectedDate === '') {
             $expectedDate = null;
         }
+
         $result = $this->contributionService->record(
-            memberId: $request->integer('user_id'),
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
             amount: (float) $request->input('amount'),
             expectedDate: $expectedDate,
             paidDate: $request->input('paid_date'),
             recordedBy: (int) $request->user()->id,
-            period: $request->input('period') // ✅ THIS WAS MISSING
+            period: $request->input('period')
         );
 
         return response()->json([
             'message' => 'Contribution recorded successfully',
-            'data' => $result['start']->load('user:id,name,email,phone'),
+            'batch_id' => $result['batch_id'] ?? null,
+            'data' => $result['start']->load($this->contributionRelations()),
             'allocations' => $result['allocations'] ?? [],
         ], 201);
     }
 
+    public function undo(Request $request)
+    {
+        $request->validate([
+            'undo' => ['required', 'array'],
+        ]);
+
+        $res = $this->contributionService->undoRecordedBatch(
+            undoPayload: (array) $request->input('undo'),
+            actorId: (int) $request->user()->id
+        );
+
+        return response()->json([
+            'message' => 'Contribution batch undone',
+            'data' => $res,
+        ]);
+    }
+
     /**
-     * Mark missed contribution (creates contribution with status missed + penalty)
+     * Mark missed contribution
      * POST /api/contributions/missed
      */
     public function markMissed(MarkMissedContributionRequest $request)
     {
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+
         $expectedDate = $request->input('expected_date');
         $period = $request->input('period');
 
         if ($expectedDate) {
-            // legacy/manual override
             $contribution = $this->contributionService->markMissed(
-                memberId: $request->integer('user_id'),
+                userId: $userId,
+                beneficiaryId: $beneficiaryId,
                 expectedDate: $expectedDate,
-                recordedBy: $request->user()->id
+                recordedBy: (int) $request->user()->id
             );
         } else {
-            // modern rule-driven
             $contribution = $this->contributionService->markMissedByPeriod(
-                memberId: $request->integer('user_id'),
+                userId: $userId,
+                beneficiaryId: $beneficiaryId,
                 period: $period,
-                recordedBy: $request->user()->id
+                recordedBy: (int) $request->user()->id
             );
         }
 
         return response()->json([
             'message' => 'Contribution marked as missed',
-            'data' => $contribution->load('user:id,name,email,phone'),
+            'data' => $contribution->load($this->contributionRelations()),
         ], 201);
     }
 
+    /**
+     * Still user-based until report service is reviewed for beneficiaries too.
+     */
     public function memberSummary(Request $request, User $user)
     {
         try {
@@ -118,63 +166,137 @@ class ContributionController extends Controller
             if ($e->getMessage() === 'Forbidden') {
                 return response()->json(['message' => 'Forbidden'], 403);
             }
+
             return response()->json(['message' => $e->getMessage()], 422);
         }
     }
+
     public function bulkPreview(BulkContributionPreviewRequest $request)
     {
-        $period = $request->query('period'); // YYYY-MM
+        $period = $request->query('period');
         $periodKey = Carbon::createFromFormat('Y-m', $period)->format('Y-m');
-
         $rules = SystemRule::firstOrFail();
 
-        // NOTE: adjust this query to your "member" definition
-        // If you have is_active column, uncomment accordingly.
+        $ownerType = $request->query('owner_type', 'user');
+
+        if ($ownerType === 'beneficiary') {
+            $beneficiariesQuery = \App\Models\Beneficiary::query()
+                ->select(['id', 'guardian_user_id', 'name', 'relationship', 'is_active']);
+
+            if (!$request->boolean('include_inactive')) {
+                $beneficiariesQuery->where('is_active', true);
+            }
+
+            $beneficiaries = $beneficiariesQuery
+                ->with('guardian:id,name,email,phone')
+                ->orderBy('name')
+                ->get();
+
+            $openingByBeneficiary = OpeningBalance::query()
+                ->whereIn('beneficiary_id', $beneficiaries->pluck('id'))
+                ->get()
+                ->keyBy('beneficiary_id');
+
+            $existingByBeneficiary = Contribution::query()
+                ->where('period_key', $periodKey)
+                ->whereIn('beneficiary_id', $beneficiaries->pluck('id'))
+                ->get()
+                ->keyBy('beneficiary_id');
+
+            $expectedDate = $this->contributionServiceExpectedFromRules($rules, $periodKey);
+
+            $rows = $beneficiaries->map(function ($b) use ($periodKey, $existingByBeneficiary, $expectedDate, $openingByBeneficiary) {
+                $env = $existingByBeneficiary->get($b->id);
+                $commitment = $this->commitmentService->activeForPeriod(null, $b->id, $periodKey);
+                $opening = $openingByBeneficiary->get($b->id);
+
+                $openingSet = (bool) $opening;
+                $hasOpening = (bool) $opening;
+
+                $canProcess = true;
+                $reason = null;
+
+                if (!$openingSet) {
+                    $canProcess = false;
+                    $reason = 'Opening capital not set.';
+                }
+
+                if (!$commitment) {
+                    $canProcess = false;
+                    $reason = 'No commitment set for this period.';
+                }
+
+                if ($env && in_array($env->status, ['paid', 'late'], true)) {
+                    $reason = "Already recorded ({$env->status}). Will be skipped.";
+                }
+
+                return [
+                    'owner_type' => 'beneficiary',
+                    'beneficiary' => [
+                        'id' => $b->id,
+                        'name' => $b->name,
+                        'relationship' => $b->relationship,
+                        'guardian' => $b->guardian ? [
+                            'id' => $b->guardian->id,
+                            'name' => $b->guardian->name,
+                            'email' => $b->guardian->email,
+                            'phone' => $b->guardian->phone,
+                        ] : null,
+                    ],
+                    'period' => $periodKey,
+                    'opening_balance_set' => $openingSet,
+                    'opening_balance' => $opening ? (float) $opening->amount : null,
+                    'opening_as_of' => $opening?->as_of_period,
+                    'commitment_amount' => $commitment ? (float) $commitment->amount : null,
+                    'expected_date' => $expectedDate,
+                    'can_process' => $canProcess,
+                    'reason' => $reason,
+                    'existing' => $env ? [
+                        'id' => $env->id,
+                        'amount' => (float) $env->amount,
+                        'status' => $env->status,
+                        'paid_date' => $env->paid_date,
+                        'penalty_amount' => (float) $env->penalty_amount,
+                    ] : null,
+                ];
+            });
+
+            return response()->json([
+                'owner_type' => 'beneficiary',
+                'period' => $periodKey,
+                'expected_date_default' => $expectedDate,
+                'rows' => $rows,
+            ]);
+        }
+
         $membersQuery = User::query()
             ->select(['id', 'name', 'email', 'phone', 'role']);
 
-        if (!($request->boolean('include_inactive'))) {
-            // If you have an is_active column:
+        if (!$request->boolean('include_inactive')) {
             // $membersQuery->where('is_active', 1);
         }
 
-        // If you only want members (not admin/treasurer), adjust:
-        // $membersQuery->where('role', 'member');
-
         $members = $membersQuery->orderBy('name')->get();
 
-        // ✅ preload opening balances for members (fast lookup)
-        $openingByUser = \App\Models\OpeningBalance::query()
+        $openingByUser = OpeningBalance::query()
             ->whereIn('user_id', $members->pluck('id'))
             ->get()
             ->keyBy('user_id');
 
-        // existing envelopes for the period (fast lookup)
-        $existing = Contribution::query()
+        $existingByUser = Contribution::query()
             ->where('period_key', $periodKey)
-            ->whereIn('user_id', $members->pluck('id'))
-            ->get()
-            ->keyBy('user_id');
-
-        $openingBalances = OpeningBalance::query()
             ->whereIn('user_id', $members->pluck('id'))
             ->get()
             ->keyBy('user_id');
 
         $expectedDate = $this->contributionServiceExpectedFromRules($rules, $periodKey);
 
-        $rows = $members->map(function ($m) use ($periodKey, $existing, $expectedDate, $openingBalances, $openingByUser) {
-            $env = $existing->get($m->id);
-
-            // commitment for this period (can be null)
-            $commitment = $this->commitmentService->activeForPeriod($m->id, $periodKey);
-
-            $ob = $openingBalances->get($m->id);
-
-            // Decide if the member is initialized
-            $openingSet = (bool) $ob;
-
+        $rows = $members->map(function ($m) use ($periodKey, $existingByUser, $expectedDate, $openingByUser) {
+            $env = $existingByUser->get($m->id);
+            $commitment = $this->commitmentService->activeForPeriod($m->id, null, $periodKey);
             $opening = $openingByUser->get($m->id);
+
+            $openingSet = (bool) $opening;
             $hasOpening = (bool) $opening;
 
             $canProcess = true;
@@ -182,18 +304,20 @@ class ContributionController extends Controller
 
             if (!$openingSet) {
                 $canProcess = false;
-                $reason = "Opening capital not set.";
+                $reason = 'Opening capital not set.';
             }
+
             if (!$commitment) {
                 $canProcess = false;
-                $reason = "No commitment set for this period.";
+                $reason = 'No commitment set for this period.';
             }
 
             if ($env && in_array($env->status, ['paid', 'late'], true)) {
-                // You can still show it, but it will be skipped in bulkStore
                 $reason = "Already recorded ({$env->status}). Will be skipped.";
             }
+
             return [
+                'owner_type' => 'user',
                 'user' => [
                     'id' => $m->id,
                     'name' => $m->name,
@@ -202,23 +326,13 @@ class ContributionController extends Controller
                     'role' => $m->role,
                 ],
                 'period' => $periodKey,
-                // ✅ opening capital info
                 'opening_balance_set' => $openingSet,
-                'opening_balance' => $ob ? [
-                    'amount' => (float) $ob->amount,
-                    'as_of_period' => $ob->as_of_period,
-                ] : null,
-
-                'commitment_amount' => $commitment ? (float) $commitment->amount : null,
-                // ✅ opening balance flags for UI
-                'has_opening' => $hasOpening,
                 'opening_balance' => $opening ? (float) $opening->amount : null,
                 'opening_as_of' => $opening?->as_of_period,
-
-                'expected_date' => $expectedDate, // default for UI
+                'commitment_amount' => $commitment ? (float) $commitment->amount : null,
+                'expected_date' => $expectedDate,
                 'can_process' => $canProcess,
                 'reason' => $reason,
-
                 'existing' => $env ? [
                     'id' => $env->id,
                     'amount' => (float) $env->amount,
@@ -230,16 +344,13 @@ class ContributionController extends Controller
         });
 
         return response()->json([
+            'owner_type' => 'user',
             'period' => $periodKey,
             'expected_date_default' => $expectedDate,
             'rows' => $rows,
         ]);
     }
 
-    /**
-     * Small helper (controller-local) to compute expected date from rules.
-     * Keeps bulkPreview independent.
-     */
     private function contributionServiceExpectedFromRules(SystemRule $rules, string $periodKey): string
     {
         $dueDay = (int) ($rules->contribution_due_day ?? 25);
@@ -249,13 +360,15 @@ class ContributionController extends Controller
 
         return $first->copy()->day(min($dueDay, $lastDay))->format('Y-m-d');
     }
+
     public function bulkStore(BulkStoreContributionsRequest $request)
     {
-        $period = $request->input('period'); // YYYY-MM
+        $period = $request->input('period');
         $periodKey = Carbon::createFromFormat('Y-m', $period)->format('Y-m');
 
-        $defaultPaidDate = $request->input('paid_date');       // optional
-        $defaultExpected = $request->input('expected_date');   // optional
+        $defaultPaidDate = $request->input('paid_date');
+        $defaultExpected = $request->input('expected_date');
+        $defaultOwnerType = $request->input('owner_type', 'user');
 
         $items = $request->input('items', []);
         $recordedBy = (int) $request->user()->id;
@@ -274,40 +387,79 @@ class ContributionController extends Controller
             ],
         ];
 
-        $userIds = collect($items)->pluck('user_id')->filter()->unique()->map(fn($v) => (int)$v)->values();
+        $userIds = collect($items)
+            ->filter(fn ($row) => ($row['owner_type'] ?? $defaultOwnerType) === 'user')
+            ->pluck('user_id')
+            ->filter()
+            ->unique()
+            ->map(fn ($v) => (int) $v)
+            ->values();
+
+        $beneficiaryIds = collect($items)
+            ->filter(fn ($row) => ($row['owner_type'] ?? $defaultOwnerType) === 'beneficiary')
+            ->pluck('beneficiary_id')
+            ->filter()
+            ->unique()
+            ->map(fn ($v) => (int) $v)
+            ->values();
 
         $existingByUser = Contribution::query()
             ->where('period_key', $periodKey)
-            ->whereIn('user_id', $userIds)
+            ->when($userIds->isNotEmpty(), fn ($q) => $q->whereIn('user_id', $userIds))
             ->get()
             ->keyBy('user_id');
 
-        $openingByUser = \App\Models\OpeningBalance::query()
-            ->whereIn('user_id', $userIds)
+        $existingByBeneficiary = Contribution::query()
+            ->where('period_key', $periodKey)
+            ->when($beneficiaryIds->isNotEmpty(), fn ($q) => $q->whereIn('beneficiary_id', $beneficiaryIds))
+            ->get()
+            ->keyBy('beneficiary_id');
+
+        $openingByUser = OpeningBalance::query()
+            ->when($userIds->isNotEmpty(), fn ($q) => $q->whereIn('user_id', $userIds))
             ->get()
             ->keyBy('user_id');
+
+        $openingByBeneficiary = OpeningBalance::query()
+            ->when($beneficiaryIds->isNotEmpty(), fn ($q) => $q->whereIn('beneficiary_id', $beneficiaryIds))
+            ->get()
+            ->keyBy('beneficiary_id');
 
         foreach ($items as $row) {
-            $userId = (int) ($row['user_id'] ?? 0);
+            $ownerType = $row['owner_type'] ?? $defaultOwnerType;
+            $userId = $ownerType === 'user' ? (int) ($row['user_id'] ?? 0) : null;
+            $beneficiaryId = $ownerType === 'beneficiary' ? (int) ($row['beneficiary_id'] ?? 0) : null;
+            $ownerId = $userId ?: $beneficiaryId;
+
             $amount = (float) ($row['amount'] ?? 0);
             $missed = (bool) ($row['missed'] ?? false);
-
             $paidDate = $row['paid_date'] ?? $defaultPaidDate;
             $expected = $row['expected_date'] ?? $defaultExpected;
 
             try {
-                if ($userId <= 0) {
-                    throw new \InvalidArgumentException("user_id is required.");
+                if ($ownerType === 'user' && !$userId) {
+                    throw new \InvalidArgumentException('user_id is required.');
                 }
 
-                $existing = $existingByUser->get($userId);
+                if ($ownerType === 'beneficiary' && !$beneficiaryId) {
+                    throw new \InvalidArgumentException('beneficiary_id is required.');
+                }
+
+                $existing = $ownerType === 'user'
+                    ? $existingByUser->get($userId)
+                    : $existingByBeneficiary->get($beneficiaryId);
+
                 $hadExisting = (bool) $existing;
 
-                // ✅ Opening capital required
-                $opening = $openingByUser->get($userId);
+                $opening = $ownerType === 'user'
+                    ? $openingByUser->get($userId)
+                    : $openingByBeneficiary->get($beneficiaryId);
+
                 if (!$opening) {
                     $results['success'][] = [
+                        'owner_type' => $ownerType,
                         'user_id' => $userId,
+                        'beneficiary_id' => $beneficiaryId,
                         'action' => 'skipped_no_opening_balance',
                         'period_key' => $periodKey,
                         'message' => 'Opening capital not set.',
@@ -317,10 +469,11 @@ class ContributionController extends Controller
                     continue;
                 }
 
-                // Optional: block periods before opening start
                 if (!empty($opening->as_of_period) && $periodKey < $opening->as_of_period) {
                     $results['success'][] = [
+                        'owner_type' => $ownerType,
                         'user_id' => $userId,
+                        'beneficiary_id' => $beneficiaryId,
                         'action' => 'skipped_before_opening_period',
                         'period_key' => $periodKey,
                         'opening_as_of' => $opening->as_of_period,
@@ -331,28 +484,30 @@ class ContributionController extends Controller
                     continue;
                 }
 
-                // ✅ Commitment required for start period
-                $commitment = $this->commitmentService->activeForPeriod($userId, $periodKey);
+                $commitment = $this->commitmentService->activeForPeriod($userId, $beneficiaryId, $periodKey);
+
                 if (!$commitment) {
                     $results['success'][] = [
+                        'owner_type' => $ownerType,
                         'user_id' => $userId,
+                        'beneficiary_id' => $beneficiaryId,
                         'action' => 'skipped_no_commitment',
                         'period_key' => $periodKey,
-                        'message' => "No commitment set for this period.",
+                        'message' => 'No commitment set for this period.',
                     ];
                     $results['totals']['ok']++;
                     $results['totals']['skipped']++;
                     continue;
                 }
+
                 $monthlyTarget = (float) $commitment->amount;
 
-                // ✅ Case 1: Missed (handle BEFORE fully-covered skip)
                 if ($missed || $amount <= 0) {
-
-                    // If already paid/late and fully funded => do NOT mark missed
-                    if ($existing && in_array($existing->status, ['paid', 'late'], true) && (float)$existing->amount >= $monthlyTarget) {
+                    if ($existing && in_array($existing->status, ['paid', 'late'], true) && (float) $existing->amount >= $monthlyTarget) {
                         $results['success'][] = [
+                            'owner_type' => $ownerType,
                             'user_id' => $userId,
+                            'beneficiary_id' => $beneficiaryId,
                             'action' => 'skipped_missed_already_paid',
                             'period_key' => $periodKey,
                             'existing_contribution_id' => $existing->id,
@@ -365,7 +520,6 @@ class ContributionController extends Controller
                         continue;
                     }
 
-                    // If envelope exists but not missed, do not silently "return existing"
                     if ($existing && $existing->status !== 'missed') {
                         throw new \InvalidArgumentException(
                             "Cannot mark missed: existing contribution already exists for {$periodKey} (status {$existing->status}, amount {$existing->amount})."
@@ -373,14 +527,17 @@ class ContributionController extends Controller
                     }
 
                     $c = $this->contributionService->markMissedByPeriod(
-                        memberId: $userId,
+                        userId: $userId,
+                        beneficiaryId: $beneficiaryId,
                         period: $periodKey,
                         recordedBy: $recordedBy,
                         expectedDate: $expected
                     );
 
                     $results['success'][] = [
+                        'owner_type' => $ownerType,
                         'user_id' => $userId,
+                        'beneficiary_id' => $beneficiaryId,
                         'action' => $existing ? 'missed_exists' : 'missed',
                         'contribution_id' => $c->id,
                         'period_key' => $c->period_key,
@@ -390,14 +547,20 @@ class ContributionController extends Controller
                     $results['totals']['ok']++;
                     $results['totals']['missed_count']++;
 
-                    $existingByUser->put($userId, $c); // keep cache consistent
+                    if ($ownerType === 'user') {
+                        $existingByUser->put($userId, $c);
+                    } else {
+                        $existingByBeneficiary->put($beneficiaryId, $c);
+                    }
+
                     continue;
                 }
 
-                // ✅ Case 2: Paid (NOW we can skip if fully covered)
-                if ($existing && (float)$existing->amount >= $monthlyTarget) {
+                if ($existing && (float) $existing->amount >= $monthlyTarget) {
                     $results['success'][] = [
+                        'owner_type' => $ownerType,
                         'user_id' => $userId,
+                        'beneficiary_id' => $beneficiaryId,
                         'action' => 'skipped_fully_covered',
                         'period_key' => $periodKey,
                         'existing_contribution_id' => $existing->id,
@@ -410,11 +573,12 @@ class ContributionController extends Controller
                 }
 
                 if (!$paidDate) {
-                    throw new \InvalidArgumentException("paid_date is required for paid rows (user_id {$userId}).");
+                    throw new \InvalidArgumentException("paid_date is required for paid rows (owner {$ownerId}).");
                 }
 
                 $res = $this->contributionService->record(
-                    memberId: $userId,
+                    userId: $userId,
+                    beneficiaryId: $beneficiaryId,
                     amount: $amount,
                     expectedDate: $expected,
                     paidDate: $paidDate,
@@ -425,7 +589,9 @@ class ContributionController extends Controller
                 $start = $res['start'] ?? null;
 
                 $results['success'][] = [
+                    'owner_type' => $ownerType,
                     'user_id' => $userId,
+                    'beneficiary_id' => $beneficiaryId,
                     'action' => $hadExisting ? 'topped_up_or_allocated' : 'paid',
                     'amount' => $amount,
                     'start_contribution_id' => $start?->id,
@@ -437,11 +603,17 @@ class ContributionController extends Controller
                 $results['totals']['amount_sum'] += $amount;
 
                 if ($start) {
-                    $existingByUser->put($userId, $start);
+                    if ($ownerType === 'user') {
+                        $existingByUser->put($userId, $start);
+                    } else {
+                        $existingByBeneficiary->put($beneficiaryId, $start);
+                    }
                 }
             } catch (\Throwable $e) {
                 $results['errors'][] = [
+                    'owner_type' => $ownerType,
                     'user_id' => $userId,
+                    'beneficiary_id' => $beneficiaryId,
                     'period_key' => $periodKey,
                     'message' => $e->getMessage(),
                 ];
@@ -454,5 +626,92 @@ class ContributionController extends Controller
             'data' => $results,
         ], 200);
     }
-    
+
+    public function preview(Request $request)
+    {
+        $request->validate([
+            'owner_type' => ['required', 'in:user,beneficiary'],
+            'user_id' => ['nullable', 'required_if:owner_type,user', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'required_if:owner_type,beneficiary', 'integer', 'exists:beneficiaries,id'],
+            'amount' => ['required', 'numeric', 'min:0.01'],
+            'paid_date' => ['required', 'date'],
+            'period' => ['nullable', 'regex:/^\d{4}-\d{2}$/'],
+            'expected_date' => ['nullable', 'date'],
+            'strict_commitment' => ['nullable', 'boolean'],
+            'bypass_min' => ['nullable', 'boolean'],
+            'financial_year_rule_id' => ['nullable', 'integer', 'exists:financial_year_rules,id'],
+        ]);
+
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+
+        $expectedDate = $request->input('expected_date') ?: null;
+
+        $res = $this->contributionService->previewAllocation(
+            userId: $userId,
+            beneficiaryId: $beneficiaryId,
+            amount: (float) $request->input('amount'),
+            expectedDate: $expectedDate,
+            paidDate: (string) $request->input('paid_date'),
+            period: $request->input('period'),
+            strictCommitment: (bool) $request->boolean('strict_commitment', true),
+            bypassMin: (bool) $request->boolean('bypass_min', false),
+            financialYearRuleId: $request->input('financial_year_rule_id')
+        );
+
+        return response()->json([
+            'message' => 'Contribution preview',
+            'data' => $res,
+        ]);
+    }
+
+    public function undoBatch(Request $request, int $batchId)
+    {
+        try {
+            $result = $this->contributionService->undoBatch(
+                batchId: $batchId,
+                reversedBy: (int) $request->user()->id
+            );
+
+            return response()->json([
+                'message' => 'Contribution batch reversed successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    public function undoLast(Request $request)
+    {
+        $request->validate([
+            'owner_type' => ['required', 'in:user,beneficiary'],
+            'user_id' => ['nullable', 'required_if:owner_type,user', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'required_if:owner_type,beneficiary', 'integer', 'exists:beneficiaries,id'],
+            'financial_year_rule_id' => ['nullable', 'integer', 'exists:financial_year_rules,id'],
+        ]);
+
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+
+        try {
+            $result = $this->contributionService->undoLastBatchForOwner(
+                userId: $userId,
+                beneficiaryId: $beneficiaryId,
+                financialYearRuleId: $request->input('financial_year_rule_id')
+                    ? (int) $request->input('financial_year_rule_id')
+                    : null,
+                reversedBy: (int) $request->user()->id
+            );
+
+            return response()->json([
+                'message' => 'Last contribution batch reversed successfully.',
+                'data' => $result,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
 }

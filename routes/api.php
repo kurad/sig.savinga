@@ -1,31 +1,46 @@
 <?php
 
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Route;
-
-use App\Http\Controllers\LoanController;
-use App\Http\Controllers\IncomeController;
-use App\Http\Controllers\MemberController;
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\BeneficiaryController;
+use App\Http\Controllers\CommitmentController;
+use App\Http\Controllers\ContributionController;
+use App\Http\Controllers\ContributionPayrollController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\DemoRequestController;
 use App\Http\Controllers\DueDateController;
 use App\Http\Controllers\ExpenseController;
+use App\Http\Controllers\FinancialYearRuleController;
+use App\Http\Controllers\IncomeController;
+use App\Http\Controllers\InvestmentController;
+use App\Http\Controllers\LoanController;
+use App\Http\Controllers\MeContributionController;
+use App\Http\Controllers\MemberController;
+use App\Http\Controllers\MemberFinancialYearController;
+use App\Http\Controllers\OpeningBalanceController;
 use App\Http\Controllers\OtpAuthController;
 use App\Http\Controllers\PenaltyController;
-use App\Http\Controllers\DashboardController;
-use App\Http\Controllers\StatementController;
-use App\Http\Controllers\CommitmentController;
 use App\Http\Controllers\ProfitCycleController;
-use App\Http\Controllers\ContributionController;
-use App\Http\Controllers\MeContributionController;
-use App\Http\Controllers\OpeningBalanceController;
-use App\Http\Controllers\FinancialYearRuleController;
+use App\Http\Controllers\StatementController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
 
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
+Route::prefix('auth/login')->group(function () {
+    Route::post('/totp', [LoginController::class, 'loginWithTotp']);
+
+    Route::post('/email/request', [LoginController::class, 'requestEmailCode']);
+    Route::post('/email/verify',  [LoginController::class, 'verifyEmailCode']);
+});
+Route::post('/demo-requests', [DemoRequestController::class, 'store']);
+
 // OTP
-Route::post('/auth/otp/request', [OtpAuthController::class, 'login'])->middleware('throttle:10,1');
-Route::post('/auth/otp/verify', [OtpAuthController::class, 'verify'])->middleware('throttle:15,1');
+Route::post('/auth/otp-sms/request', [OtpAuthController::class, 'login'])->middleware('throttle:10,1');
+Route::post('/auth/otp/request-otp', [OtpAuthController::class, 'requestOtp'])->middleware('throttle:10,1');
+Route::post('/auth/otp-sms/verify', [OtpAuthController::class, 'verify'])->middleware('throttle:15,1');
+Route::post('/auth/otp/verify-otp', [OtpAuthController::class, 'verifyOtp'])->middleware('throttle:15,1');
 
 /**
  * =========================================================
@@ -68,11 +83,25 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/members/{user}', [MemberController::class, 'update']);
         Route::patch('/members/{user}/toggle-active', [MemberController::class, 'toggleStatus']);
 
+
+        Route::post('/beneficiaries', [BeneficiaryController::class, 'store']);
+        Route::patch('beneficiaries/{beneficiary}/set-active', [BeneficiaryController::class, 'setActive']);
+
+        Route::get('/opening-balances/beneficiary/{beneficiaryId}', [OpeningBalanceController::class, 'showByBeneficiary']);
+        Route::put('/opening-balances/{openingBalance}', [OpeningBalanceController::class, 'update']);
+
+        Route::get('/commitments/by-participant', [CommitmentController::class, 'showByParticipant']);
+        Route::put('/commitments/{commitment}', [CommitmentController::class, 'update']);
+
         // Contributions (group-level)
         Route::get('/contributions', [ContributionController::class, 'index']);
         Route::post('/contributions', [ContributionController::class, 'store']);
         Route::post('/contributions/missed', [ContributionController::class, 'markMissed']);
+        Route::post('/contributions/undo', [ContributionController::class, 'undo']);
+        Route::post('/contributions/preview', [ContributionController::class, 'preview']);
 
+        Route::post('/contributions/batches/{batchId}/undo', [ContributionController::class, 'undoBatch']);
+        Route::post('/contributions/undo-last', [ContributionController::class, 'undoLast']);
         // Loans (group-level)
         Route::get('/loans', [LoanController::class, 'index']);
         Route::post('/loans', [LoanController::class, 'disburse']);
@@ -113,6 +142,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/incomes', [IncomeController::class, 'index']);
         Route::post('/incomes', [IncomeController::class, 'store']);
 
+        // Investments (group-level)
+        Route::get('/investments', [InvestmentController::class, 'index']);
+        Route::post('/investments', [InvestmentController::class, 'store']);
+        Route::post('/investments/{investment}/sell', [InvestmentController::class, 'sell']);
+
         // Commitments (admin/treasurer)
         Route::get('/commitments', [CommitmentController::class, 'index']);
         Route::get('/commitments/active', [CommitmentController::class, 'active']);
@@ -122,6 +156,10 @@ Route::middleware('auth:sanctum')->group(function () {
         // Bulk contributions
         Route::get('/contributions/bulk/preview', [ContributionController::class, 'bulkPreview']);
         Route::post('/contributions/bulk', [ContributionController::class, 'bulkStore']);
+
+
+        Route::post('/contributions/payroll/preview', [ContributionPayrollController::class, 'preview']);
+        Route::post('/contributions/payroll/commit',  [ContributionPayrollController::class, 'commit']);
 
         Route::post('/opening-balances', [OpeningBalanceController::class, 'store']);
         Route::get('/opening-balances/user/{userId}', [OpeningBalanceController::class, 'showByUser']);
@@ -139,5 +177,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/members/{user}/next-due', [DueDateController::class, 'memberNextDue']);
 
         Route::get('/statement', [StatementController::class, 'index']);
+
+        Route::post('/member-financial-years/upsert', [MemberFinancialYearController::class, 'upsert']);
+        Route::get('/member-financial-years', [MemberFinancialYearController::class, 'show']);
     });
 });

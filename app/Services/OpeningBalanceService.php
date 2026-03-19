@@ -22,7 +22,9 @@ class OpeningBalanceService
             $amount = (float) $data['amount'];
             $note   = $data['note'] ?? null;
 
-            $existing = OpeningBalance::where('user_id', $userId)->first();
+            $existing = OpeningBalance::where('user_id', $userId)
+            ->where('as_of_period', $asOf)
+            ->first();
             if ($existing) {
                 throw ValidationException::withMessages([
                     'user_id' => ['Opening capital already set for this member. Use an adjustment/correction flow if needed.'],
@@ -51,8 +53,7 @@ class OpeningBalanceService
                 'created_by'  => $adminId,
             ]);
 
-            $ob->transaction_id = $tx->id;
-            $ob->save();
+            $ob->update(['transaction_id' => $tx->id]);
 
             return $ob;
         });

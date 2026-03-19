@@ -43,6 +43,7 @@ class AuthController extends Controller
         ]);
     }
 
+
     public function me()
     {
         $user = request()->user();

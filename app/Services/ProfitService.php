@@ -5,6 +5,8 @@ namespace App\Services;
 use Exception;
 use Carbon\Carbon;
 use App\Models\User;
+use App\Models\Income;
+use App\Models\Expense;
 use App\Models\SystemRule;
 use App\Models\ProfitCycle;
 use App\Models\Transaction;
@@ -65,7 +67,19 @@ class ProfitService
             ->whereBetween('created_at', [$start, $end])
             ->sum('credit');
 
-        $profit = $interestReceived + $penaltiesReceived;
+        // Other incomes in this cycle (✅ adjust column if yours differs)
+        $otherIncome = (float) Income::whereBetween('income_date', [
+            $start->toDateString(),
+            $end->toDateString()
+        ])->sum('amount');
+
+        // Expenses in this cycle (✅ expense_date)
+        $expenses = (float) Expense::whereBetween('expense_date', [
+            $start->toDateString(),
+            $end->toDateString()
+        ])->sum('amount');
+
+        $profit = $interestReceived + $penaltiesReceived + $otherIncome - $expenses;
 
         return round(max(0, $profit), 2);
     }
@@ -125,8 +139,8 @@ class ProfitService
             foreach ($shares as $userId => $amount) {
                 ProfitDistribution::create([
                     'profit_cycle_id'    => $cycle->id,
-                    'user_id'            => $userId,
-                    'amount'             => $amount,
+                    'user_id'            => (int) $userId,
+                    'amount'             => (float) $amount,
                     'distribution_type'  => $distributionType,
                     'status'             => $autoPay ? 'paid' : 'pending',
                 ]);
@@ -189,34 +203,35 @@ class ProfitService
                         credit: 0,
                         userId: $dist->user_id,
                         reference: 'Profit cash payout - Cycle ' . $cycleId,
-                        createdBy: $recordedBy
-                    );
-                } else {
-                    // Savings allocation: net-zero group cash, but member gets credited
-                    // Debit (pool)
-                    $this->ledger->record(
-                        type: 'profit',
-                        debit: $amount,
-                        credit: 0,
-                        userId: $dist->user_id,
-                        reference: 'Profit allocated to savings (pool) - Cycle ' . $cycleId,
                         createdBy: $recordedBy,
                         sourceType: 'profit_distribution',
                         sourceId: $dist->id
                     );
-
-                    // Credit (member)
+                } else {
+                    // Savings allocation: credit member savings (shows on statement)
                     $this->ledger->record(
                         type: 'profit',
                         debit: 0,
                         credit: $amount,
                         userId: $dist->user_id,
                         reference: 'Profit allocated to savings - Cycle ' . $cycleId,
-                        createdBy: $recordedBy
+                        createdBy: $recordedBy,
+                        sourceType: 'profit_distribution',
+                        sourceId: $dist->id
                     );
                 }
 
                 $dist->update(['status' => 'paid']);
+            }
+             // Optional: mark cycle paid when all distributions are paid
+            $pendingLeft = ProfitDistribution::where('profit_cycle_id', $cycleId)
+                ->where('status', 'pending')
+                ->exists();
+
+            if (!$pendingLeft) {
+                // Only do this if your profit_cycles.status supports 'paid'
+                // Otherwise remove this line.
+                $cycle->update(['status' => 'paid']);
             }
         });
     }
@@ -227,22 +242,30 @@ class ProfitService
      *  - equal: profit / members
      *  - savings_ratio: based on contributions within the cycle
      */
-    protected function calculateMemberShares(
+   protected function calculateMemberShares(
         string $rulesMethod,
         ProfitCycle $cycle,
         array $memberIds,
         float $totalProfit
     ): array {
+        $memberIds = array_values(array_unique(array_map('intval', $memberIds)));
+        if (count($memberIds) === 0) {
+            throw new Exception('No members provided for profit sharing.');
+        }
+
+        if ($totalProfit <= 0) {
+            return array_fill_keys($memberIds, 0);
+        }
+
         $shares = [];
 
         if ($rulesMethod === 'equal') {
             $per = round($totalProfit / count($memberIds), 2);
-            // Handle rounding remainder by adding it to first member
             $total = $per * count($memberIds);
             $remainder = round($totalProfit - $total, 2);
 
             foreach ($memberIds as $i => $id) {
-                $shares[$id] = $per + ($i === 0 ? $remainder : 0);
+                $shares[$id] = round($per + ($i === 0 ? $remainder : 0), 2);
             }
 
             return $shares;
@@ -252,10 +275,10 @@ class ProfitService
             throw new Exception('Invalid profit_share_method in SystemRule.');
         }
 
-        // savings_ratio: weight = member contributions during the cycle
         $start = Carbon::parse($cycle->start_date)->startOfDay();
         $end   = Carbon::parse($cycle->end_date)->endOfDay();
 
+        // Weight by contributions posted in ledger during the cycle
         $weights = [];
         $totalWeight = 0.0;
 
@@ -269,7 +292,7 @@ class ProfitService
             $totalWeight += $w;
         }
 
-        // If everyone has 0 contributions in the cycle, fallback to equal
+        // fallback to equal if all weights are zero
         if ($totalWeight <= 0) {
             $per = round($totalProfit / count($memberIds), 2);
             foreach ($memberIds as $id) {
@@ -278,13 +301,11 @@ class ProfitService
             return $shares;
         }
 
-        // Proportional shares
+        // proportional shares with rounding fix on last member
         $running = 0.0;
-        $ids = array_values($memberIds);
 
-        foreach ($ids as $index => $id) {
-            if ($index === count($ids) - 1) {
-                // last member gets remainder to fix rounding
+        foreach ($memberIds as $index => $id) {
+            if ($index === count($memberIds) - 1) {
                 $shares[$id] = round($totalProfit - $running, 2);
                 break;
             }
