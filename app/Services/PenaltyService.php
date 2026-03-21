@@ -40,15 +40,11 @@ class PenaltyService
         }
 
         if (!is_null($userId) && $userId <= 0) {
-            throw new InvalidArgumentException(
-                'user_id must be a valid positive integer.'
-            );
+            throw new InvalidArgumentException('user_id must be a valid positive integer.');
         }
 
         if (!is_null($beneficiaryId) && $beneficiaryId <= 0) {
-            throw new InvalidArgumentException(
-                'beneficiary_id must be a valid positive integer.'
-            );
+            throw new InvalidArgumentException('beneficiary_id must be a valid positive integer.');
         }
     }
 
@@ -67,8 +63,8 @@ class PenaltyService
         $this->validateOwner($userId, $beneficiaryId);
 
         return Penalty::query()
-            ->when(!is_null($userId), fn($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn($q) => $q->where('beneficiary_id', $beneficiaryId));
+            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
     }
 
     protected function isLateContributionPenaltyExempt(string $periodKey, Carbon $paidDate): bool
@@ -80,26 +76,25 @@ class PenaltyService
             ->exists();
     }
 
-    protected function contributionPenaltyRate(): float
+    protected function lateContributionPenaltyRate(): float
     {
         $rules = SystemRule::firstOrFail();
 
-        return round((float) (
-            $rules->missed_contribution_penalty_percent
-            ?? $rules->contribution_penalty_percent
-            ?? 0
-        ), 4);
+        return round((float) ($rules->late_contribution_penalty_percent ?? 0), 4);
+    }
+
+    protected function missedContributionPenaltyRate(): float
+    {
+        $rules = SystemRule::firstOrFail();
+
+        return round((float) ($rules->missed_contribution_penalty_percent ?? 0), 4);
     }
 
     protected function loanPenaltyRate(): float
     {
         $rules = SystemRule::firstOrFail();
 
-        return round((float) (
-            $rules->late_loan_penalty_percent
-            ?? $rules->loan_penalty_percent
-            ?? 0
-        ), 4);
+        return round((float) ($rules->late_loan_penalty_percent ?? 0), 4);
     }
 
     /**
@@ -121,12 +116,12 @@ class PenaltyService
             return null;
         }
 
-        $rate = $this->contributionPenaltyRate();
+        $rate = $this->lateContributionPenaltyRate();
         if ($rate <= 0) {
             return null;
         }
 
-        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase, ['contribution']);
         $amount = $this->computeCompoundAmount($baseAmount, $rate);
 
         return $this->apply(
@@ -155,12 +150,12 @@ class PenaltyService
     ): ?Penalty {
         $this->validateOwner($userId, $beneficiaryId);
 
-        $rate = $this->contributionPenaltyRate();
+        $rate = $this->missedContributionPenaltyRate();
         if ($rate <= 0) {
             return null;
         }
 
-        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase, ['contribution']);
         $amount = $this->computeCompoundAmount($baseAmount, $rate);
 
         return $this->apply(
@@ -196,7 +191,7 @@ class PenaltyService
             return null;
         }
 
-        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase, ['loan', 'loan_installment']);
         $amount = $this->computeCompoundAmount($baseAmount, $rate);
 
         return $this->apply(
@@ -228,7 +223,7 @@ class PenaltyService
             return null;
         }
 
-        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase);
+        $baseAmount = $this->compoundBase($userId, $beneficiaryId, $principalBase, ['loan', 'loan_installment']);
         $amount = $this->computeCompoundAmount($baseAmount, $rate);
 
         return $this->apply(
@@ -415,13 +410,22 @@ class PenaltyService
             ->sum('amount'), 2);
     }
 
-    protected function compoundBase(?int $userId, ?int $beneficiaryId, float $principalBase): float
-    {
+    protected function compoundBase(
+        ?int $userId,
+        ?int $beneficiaryId,
+        float $principalBase,
+        array $sourceTypes = []
+    ): float {
         $principalBase = round((float) $principalBase, 2);
 
-        $unpaidPenalties = round((float) $this->ownerPenaltyQuery($userId, $beneficiaryId)
-            ->where('status', 'unpaid')
-            ->sum('amount'), 2);
+        $query = $this->ownerPenaltyQuery($userId, $beneficiaryId)
+            ->where('status', 'unpaid');
+
+        if (!empty($sourceTypes)) {
+            $query->whereIn('source_type', $sourceTypes);
+        }
+
+        $unpaidPenalties = round((float) $query->sum('amount'), 2);
 
         return round($principalBase + $unpaidPenalties, 2);
     }
