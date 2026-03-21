@@ -162,7 +162,10 @@ class StatementService
            ========================= */
 
         $todayPeriod = Carbon::now('Africa/Kigali')->format('Y-m');
-        $commitmentToday = $this->commitmentService->activeForPeriod($member->id, $todayPeriod);
+        $commitmentToday = $this->commitmentService->activeForPeriod(
+            $member->id,
+            null,
+            $todayPeriod);
 
         $nextDue = null;
         if ($commitmentToday) {
