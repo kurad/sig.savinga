@@ -23,7 +23,6 @@ class MeContributionController extends Controller
         $from = (string) $request->query('from', now('Africa/Kigali')->format('Y-m'));
         $to   = (string) $request->query('to', now('Africa/Kigali')->format('Y-m'));
 
-        // Validate month keys quickly
         if (!preg_match('/^\d{4}-\d{2}$/', $from) || !preg_match('/^\d{4}-\d{2}$/', $to)) {
             return response()->json([
                 'message' => 'Invalid from/to. Use YYYY-MM.',
@@ -31,9 +30,13 @@ class MeContributionController extends Controller
             ], 422);
         }
 
-        // Get active commitment for current period (or fallback)
         $periodKey = now('Africa/Kigali')->format('Y-m');
-        $commitment = $this->commitmentService->activeForPeriod($me->id, $periodKey);
+
+        $commitment = $this->commitmentService->activeForPeriod(
+            userId: (int) $me->id,
+            beneficiaryId: null,
+            periodKey: $periodKey
+        );
 
         if (!$commitment) {
             return response()->json([

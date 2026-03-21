@@ -2,14 +2,16 @@
 
 namespace App\Models;
 
-use App\Models\User;
-use App\Models\LoanRepayment;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Loan extends Model
 {
     use HasFactory;
+
     protected $fillable = [
         'user_id',
         'beneficiary_id',
@@ -32,38 +34,121 @@ class Loan extends Model
         'rate_notes',
     ];
 
-
     protected $casts = [
+        'user_id' => 'integer',
+        'beneficiary_id' => 'integer',
+        'base_loan_id' => 'integer',
+        'interest_term_months' => 'integer',
+        'duration_months' => 'integer',
+
         'issued_date' => 'date',
         'due_date' => 'date',
         'rate_set_at' => 'datetime',
+
         'principal' => 'decimal:2',
         'interest_rate' => 'decimal:2',
         'interest_amount' => 'decimal:2',
         'total_payable' => 'decimal:2',
-        'base_loan_id' => 'integer',
         'monthly_installment' => 'decimal:2',
     ];
-    public function user()
+
+    public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
-    public function repayments()
+
+    public function beneficiary(): BelongsTo
+    {
+        return $this->belongsTo(Beneficiary::class);
+    }
+
+    public function repayments(): HasMany
     {
         return $this->hasMany(LoanRepayment::class);
     }
+
+    public function guarantors(): HasMany
+    {
+        return $this->hasMany(LoanGuarantor::class);
+    }
+
+    public function installments(): HasMany
+    {
+        return $this->hasMany(LoanInstallment::class)->orderBy('installment_no');
+    }
+
+    public function baseLoan(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'base_loan_id');
+    }
+
+    public function topUps(): HasMany
+    {
+        return $this->hasMany(self::class, 'base_loan_id')->orderBy('created_at');
+    }
+
+    public function approvedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    public function rateSetter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'rate_set_by');
+    }
+
+    public function scopeForOwner(Builder $query, int $userId, ?int $beneficiaryId = null): Builder
+    {
+        $query->where('user_id', $userId);
+
+        if (is_null($beneficiaryId)) {
+            return $query->whereNull('beneficiary_id');
+        }
+
+        return $query->where('beneficiary_id', $beneficiaryId);
+    }
+
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('status', 'active');
+    }
+
+    public function scopeCompleted(Builder $query): Builder
+    {
+        return $query->where('status', 'completed');
+    }
+
+    public function scopeDefaulted(Builder $query): Builder
+    {
+        return $query->where('status', 'defaulted');
+    }
+
+    public function scopeInstallmentMode(Builder $query): Builder
+    {
+        return $query->where('repayment_mode', 'installment');
+    }
+
+    public function scopeOnceMode(Builder $query): Builder
+    {
+        return $query->where(function ($q) {
+            $q->whereNull('repayment_mode')
+              ->orWhere('repayment_mode', 'once');
+        });
+    }
+
     public function principalPaid(): float
     {
         return round((float) $this->repayments()->sum('principal_component'), 2);
-    }
-    public function guarantors()
-    {
-        return $this->hasMany(\App\Models\LoanGuarantor::class);
     }
 
     public function interestPaid(): float
     {
         return round((float) $this->repayments()->sum('interest_component'), 2);
+    }
+
+    public function totalRepaid(): float
+    {
+        return round((float) $this->repayments()->sum('amount'), 2);
     }
 
     public function outstandingPrincipal(): float
@@ -74,7 +159,6 @@ class Loan extends Model
 
     public function outstandingInterest(): float
     {
-        // Prefer stored interest_amount if you have it, else derive it.
         $interestTotal = $this->interest_amount !== null
             ? round((float) $this->interest_amount, 2)
             : round(max(0, (float) $this->total_payable - (float) $this->principal), 2);
@@ -92,43 +176,54 @@ class Loan extends Model
 
     public function getInterestAttribute(): float
     {
-        // Prefer stored snapshot if present
-        if (!is_null($this->interest_amount) && (float)$this->interest_amount > 0) {
-            return round((float)$this->interest_amount, 2);
+        if (!is_null($this->interest_amount) && (float) $this->interest_amount > 0) {
+            return round((float) $this->interest_amount, 2);
         }
 
-        // Fallback: derived but safe
         $derived = (float) $this->total_payable - (float) $this->principal;
         return round(max(0, $derived), 2);
-    }
-
-    public function totalRepaid(): float
-    {
-        return round((float) $this->repayments()->sum('amount'), 2);
     }
 
     public function installmentsPaidCount(): int
     {
         return (int) $this->installments()->where('status', 'paid')->count();
     }
-    public function installments()
-    {
-        return $this->hasMany(\App\Models\LoanInstallment::class)->orderBy('installment_no');
-    }
+
     public function nextUnpaidInstallment()
     {
-        return $this->installments()->whereIn('status', ['unpaid', 'partial'])->orderBy('installment_no')->first();
+        return $this->installments()
+            ->whereIn('status', ['unpaid', 'partial'])
+            ->orderBy('installment_no')
+            ->first();
     }
-    public function baseLoan()
+
+    public function isActive(): bool
     {
-        return $this->belongsTo(self::class, 'base_loan_id');
+        return $this->status === 'active';
     }
-    public function topUps()
+
+    public function isCompleted(): bool
     {
-        return $this->hasMany(self::class, 'base_loan_id')->orderBy('created_at');
+        return $this->status === 'completed';
     }
-    public function beneficiary()
+
+    public function isDefaulted(): bool
     {
-        return $this->belongsTo(Beneficiary::class);
+        return $this->status === 'defaulted';
+    }
+
+    public function isUserLevel(): bool
+    {
+        return is_null($this->beneficiary_id);
+    }
+
+    public function isBeneficiaryLevel(): bool
+    {
+        return !is_null($this->beneficiary_id);
+    }
+
+    public function isTopUp(): bool
+    {
+        return !is_null($this->base_loan_id);
     }
 }
