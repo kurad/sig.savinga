@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreDemoRequestRequest;
+use App\Mail\DemoRequestConfirmation;
 use App\Mail\DemoRequestNotification;
 use App\Models\DemoRequest;
 use Illuminate\Http\Request;
@@ -16,9 +17,13 @@ class DemoRequestController extends Controller
         $demoRequest = DemoRequest::create($request->validated());
 
         try {
+            // Email to YOU (admin)
             Mail::to(config('mail.demo_receiver_address'))->send(
                 new DemoRequestNotification($demoRequest)
             );
+             // Confirmation email to requester
+            Mail::to($demoRequest->email)
+                ->send(new DemoRequestConfirmation($demoRequest));
         } catch (\Throwable $e) {
             // Keep request saved even if email sending fails
             report($e);
