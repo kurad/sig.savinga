@@ -15,14 +15,13 @@ class LoanController extends Controller
         protected LoanService $loanService
     ) {}
 
-    protected function resolveOwnerFromRequest(Request $request): array
+    protected function resolveParticipantFromRequest(Request $request): array
     {
-        $ownerType = $request->input('owner_type');
-
         return [
-            'owner_type' => $ownerType,
-            'userId' => $ownerType === 'user' ? $request->integer('user_id') : null,
-            'beneficiaryId' => $ownerType === 'beneficiary' ? $request->integer('beneficiary_id') : null,
+            'userId' => (int) $request->input('user_id'),
+            'beneficiaryId' => $request->filled('beneficiary_id')
+                ? (int) $request->input('beneficiary_id')
+                : null,
         ];
     }
 
@@ -44,7 +43,6 @@ class LoanController extends Controller
         }
 
         $data = $request->validate([
-            'owner_type' => ['nullable', 'in:user,beneficiary'],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'status' => ['nullable', 'string'],
@@ -55,8 +53,8 @@ class LoanController extends Controller
 
         return response()->json(
             $this->loanService->listLoans(
-                userId: $data['owner_type'] === 'user' ? ($data['user_id'] ?? null) : ($data['user_id'] ?? null),
-                beneficiaryId: $data['owner_type'] === 'beneficiary' ? ($data['beneficiary_id'] ?? null) : ($data['beneficiary_id'] ?? null),
+                userId: $data['user_id'] ?? null,
+                beneficiaryId: $data['beneficiary_id'] ?? null,
                 status: $data['status'] ?? null,
                 perPage: $perPage
             )
@@ -72,9 +70,8 @@ class LoanController extends Controller
         }
 
         $data = $request->validate([
-            'owner_type' => ['required', 'in:user,beneficiary'],
-            'user_id' => ['nullable', 'required_if:owner_type,user', 'integer', 'exists:users,id'],
-            'beneficiary_id' => ['nullable', 'required_if:owner_type,beneficiary', 'integer', 'exists:beneficiaries,id'],
+            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
 
             'principal' => ['required', 'numeric', 'min:1'],
             'interest_rate' => ['required', 'numeric', 'min:0.01'],
@@ -84,7 +81,7 @@ class LoanController extends Controller
             'duration_months' => ['nullable', 'integer', 'min:1'],
         ]);
 
-        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveParticipantFromRequest($request);
 
         try {
             $repaymentMode = $data['repayment_mode'] ?? 'once';
@@ -144,9 +141,8 @@ class LoanController extends Controller
         }
 
         $data = $request->validate([
-            'owner_type' => ['required', 'in:user,beneficiary'],
-            'user_id' => ['nullable', 'required_if:owner_type,user', 'integer', 'exists:users,id'],
-            'beneficiary_id' => ['nullable', 'required_if:owner_type,beneficiary', 'integer', 'exists:beneficiaries,id'],
+            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
 
             'principal' => ['required', 'numeric', 'min:1'],
             'interest_rate' => ['required', 'numeric', 'min:0.01'],
@@ -156,7 +152,7 @@ class LoanController extends Controller
             'duration_months' => ['nullable', 'integer', 'min:1'],
         ]);
 
-        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveParticipantFromRequest($request);
 
         try {
             $preview = $this->loanService->disbursePreview(
@@ -197,9 +193,8 @@ class LoanController extends Controller
         }
 
         $data = $request->validate([
-            'owner_type' => ['required', 'in:user,beneficiary'],
-            'user_id' => ['nullable', 'required_if:owner_type,user', 'integer', 'exists:users,id'],
-            'beneficiary_id' => ['nullable', 'required_if:owner_type,beneficiary', 'integer', 'exists:beneficiaries,id'],
+            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
 
             'principal' => ['required', 'numeric', 'min:1'],
             'due_date' => ['nullable', 'date'],
@@ -222,7 +217,7 @@ class LoanController extends Controller
             return response()->json(['message' => 'due_date is required for once loans.'], 422);
         }
 
-        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveOwnerFromRequest($request);
+        ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveParticipantFromRequest($request);
 
         try {
             $loan = $this->loanService->disburse(
@@ -486,7 +481,6 @@ class LoanController extends Controller
         }
 
         $data = $request->validate([
-            'owner_type' => ['nullable', 'in:user,beneficiary'],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'status' => ['nullable', 'string', 'in:active,completed,defaulted'],
@@ -513,10 +507,9 @@ class LoanController extends Controller
             ->leftJoinSub($repaySub, 'r', function ($join) {
                 $join->on('loans.id', '=', 'r.loan_id');
             })
-            ->when($data['owner_type'] === 'user' && $userId, fn ($q) => $q->where('loans.user_id', $userId))
-            ->when($data['owner_type'] === 'beneficiary' && $beneficiaryId, fn ($q) => $q->where('loans.beneficiary_id', $beneficiaryId))
-            ->when(empty($data['owner_type']) && $userId, fn ($q) => $q->where('loans.user_id', $userId))
-            ->when(empty($data['owner_type']) && $beneficiaryId, fn ($q) => $q->where('loans.beneficiary_id', $beneficiaryId))
+            ->when($userId, fn ($q) => $q->where('loans.user_id', $userId))
+            ->when(is_null($beneficiaryId) && $userId, fn ($q) => $q->whereNull('loans.beneficiary_id'))
+            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('loans.beneficiary_id', $beneficiaryId))
             ->when($status, fn ($q) => $q->where('loans.status', $status))
             ->when($from, fn ($q) => $q->where('loans.created_at', '>=', $from))
             ->when($to, fn ($q) => $q->where('loans.created_at', '<=', $to))
@@ -590,7 +583,6 @@ class LoanController extends Controller
         return response()->json([
             'message' => 'Loan insights',
             'filters' => [
-                'owner_type' => $data['owner_type'] ?? null,
                 'user_id' => $userId,
                 'beneficiary_id' => $beneficiaryId,
                 'status' => $status,
