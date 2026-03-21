@@ -20,7 +20,7 @@ class DemoRequestConfirmation extends Mailable
 
     public function build()
     {
-        return $this->subject('Your Demo Request has been received. We will get back to you shortly!')
+        return $this->subject('Demo Request confirmation.')
             ->view('emails.demo_request_confirmation');
     }
 }
