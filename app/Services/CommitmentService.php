@@ -14,12 +14,12 @@ class CommitmentService
         $this->assertPeriodKey($period);
         $this->assertPeriodKey($anchor);
 
+        if ($cycleMonths <= 0) {
+            throw new InvalidArgumentException('cycleMonths must be greater than 0.');
+        }
+
         $p = Carbon::createFromFormat('Y-m', $period)->startOfMonth();
         $a = Carbon::createFromFormat('Y-m', $anchor)->startOfMonth();
-
-        if ($cycleMonths <= 0) {
-            throw new InvalidArgumentException('cycleMonths must be > 0.');
-        }
 
         if ($p->lt($a)) {
             throw new InvalidArgumentException("Period {$period} is before cycle anchor {$anchor}.");
@@ -29,7 +29,7 @@ class CommitmentService
         $cycleIndex = intdiv($diffMonths, $cycleMonths);
 
         $start = $a->copy()->addMonthsNoOverflow($cycleIndex * $cycleMonths);
-        $end   = $start->copy()->addMonthsNoOverflow($cycleMonths - 1);
+        $end = $start->copy()->addMonthsNoOverflow($cycleMonths - 1);
 
         return [$start->format('Y-m'), $end->format('Y-m')];
     }
@@ -40,28 +40,32 @@ class CommitmentService
         return $period === $cycleStart;
     }
 
-    /**
-     * Find active commitment that covers a given period (YYYY-MM).
-     */
     public function activeForPeriod(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         string $periodKey
     ): ?ContributionCommitment {
         $this->validateOwner($userId, $beneficiaryId);
         $this->assertPeriodKey($periodKey);
 
-        return ContributionCommitment::query()
-            ->active()
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId))
-            ->coversPeriod($periodKey)
+        $query = ContributionCommitment::query()
+            ->where('user_id', $userId)
+            ->where('status', 'active')
+            ->where('cycle_start_period', '<=', $periodKey)
+            ->where('cycle_end_period', '>=', $periodKey)
             ->orderByDesc('activated_at')
-            ->first();
-    }
+            ->orderByDesc('id');
 
+        if (is_null($beneficiaryId)) {
+            $query->whereNull('beneficiary_id');
+        } else {
+            $query->where('beneficiary_id', $beneficiaryId);
+        }
+
+        return $query->first();
+    }
     public function setForCycle(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         float $amount,
         string $cycleStart,
@@ -75,10 +79,12 @@ class CommitmentService
 
         $amount = round((float) $amount, 2);
         if ($amount <= 0) {
-            throw new InvalidArgumentException('Commitment amount must be > 0.');
+            throw new InvalidArgumentException('Commitment amount must be greater than 0.');
         }
 
-        $cycleMonths = max(1, (int) $cycleMonths);
+        if ($cycleMonths <= 0) {
+            throw new InvalidArgumentException('cycleMonths must be greater than 0.');
+        }
 
         if ($cycleEnd < $cycleStart) {
             throw new InvalidArgumentException('cycleEnd cannot be before cycleStart.');
@@ -93,35 +99,42 @@ class CommitmentService
             $cycleMonths,
             $createdBy
         ) {
-            $existing = ContributionCommitment::query()
-                ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-                ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId))
+            $baseQuery = ContributionCommitment::query()
+                ->where('user_id', $userId);
+
+            if (is_null($beneficiaryId)) {
+                $baseQuery->whereNull('beneficiary_id');
+            } else {
+                $baseQuery->where('beneficiary_id', $beneficiaryId);
+            }
+
+            $existingExact = (clone $baseQuery)
                 ->where('cycle_start_period', $cycleStart)
                 ->where('cycle_end_period', $cycleEnd)
                 ->lockForUpdate()
                 ->first();
 
-            if ($existing) {
-                $existing->update([
+            if ($existingExact) {
+                $existingExact->update([
                     'amount' => $amount,
                     'cycle_months' => $cycleMonths,
                     'status' => 'active',
                     'activated_at' => now('Africa/Kigali'),
                 ]);
 
-                return $existing->refresh();
+                return $existingExact->refresh();
             }
 
-            ContributionCommitment::query()
-                ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-                ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId))
+            (clone $baseQuery)
                 ->where('status', 'active')
                 ->where(function ($q) use ($cycleStart, $cycleEnd) {
                     $q->where('cycle_end_period', '>=', $cycleStart)
                         ->where('cycle_start_period', '<=', $cycleEnd);
                 })
                 ->lockForUpdate()
-                ->update(['status' => 'inactive']);
+                ->update([
+                    'status' => 'expired',
+                ]);
 
             return ContributionCommitment::create([
                 'user_id' => $userId,
@@ -136,9 +149,8 @@ class CommitmentService
             ]);
         });
     }
-
     public function setForPeriod(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         string $periodKey,
         float $amount,
@@ -162,9 +174,8 @@ class CommitmentService
             createdBy: $createdBy
         );
     }
-
     public function ensureCoversPeriod(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         string $periodKey,
         float $defaultAmount,
@@ -176,6 +187,7 @@ class CommitmentService
         $this->assertPeriodKey($periodKey);
 
         $existing = $this->activeForPeriod($userId, $beneficiaryId, $periodKey);
+
         if ($existing) {
             return $existing;
         }
@@ -190,22 +202,131 @@ class CommitmentService
             cycleMonths: $cycleMonths
         );
     }
-
-    private function validateOwner(?int $userId, ?int $beneficiaryId): void
+    public function expire(ContributionCommitment $commitment): ContributionCommitment
     {
-        $hasUser = !is_null($userId);
-        $hasBeneficiary = !is_null($beneficiaryId);
+        if ($commitment->status !== 'expired') {
+            $commitment->update([
+                'status' => 'expired',
+            ]);
+        }
 
-        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
-            throw new InvalidArgumentException(
-                'A commitment must belong to either a user or a beneficiary.'
-            );
+        return $commitment->refresh();
+    }
+
+    /**
+     * Conservative update aligned with schema.
+     */
+    public function updateCommitment(
+        ContributionCommitment $commitment,
+        int $userId,
+        ?int $beneficiaryId,
+        float $amount,
+        string $cycleStart,
+        string $cycleEnd,
+        int $cycleMonths,
+        string $status,
+        $activatedAt = null
+    ): ContributionCommitment {
+        $this->validateOwner($userId, $beneficiaryId);
+        $this->assertPeriodKey($cycleStart);
+        $this->assertPeriodKey($cycleEnd);
+
+        $amount = round((float) $amount, 2);
+
+        if ($amount <= 0) {
+            throw new InvalidArgumentException('Commitment amount must be greater than 0.');
+        }
+
+        if ($cycleMonths <= 0) {
+            throw new InvalidArgumentException('cycleMonths must be greater than 0.');
+        }
+
+        if ($cycleEnd < $cycleStart) {
+            throw new InvalidArgumentException('cycleEnd cannot be before cycleStart.');
+        }
+
+        if (!in_array($status, ['active', 'expired'], true)) {
+            throw new InvalidArgumentException('Invalid commitment status.');
+        }
+
+        return DB::transaction(function () use (
+            $commitment,
+            $userId,
+            $beneficiaryId,
+            $amount,
+            $cycleStart,
+            $cycleEnd,
+            $cycleMonths,
+            $status,
+            $activatedAt
+        ) {
+            $conflictQuery = ContributionCommitment::query()
+                ->where('id', '!=', $commitment->id)
+                ->where('user_id', $userId)
+                ->where('cycle_start_period', $cycleStart)
+                ->where('cycle_end_period', $cycleEnd);
+
+            if (is_null($beneficiaryId)) {
+                $conflictQuery->whereNull('beneficiary_id');
+            } else {
+                $conflictQuery->where('beneficiary_id', $beneficiaryId);
+            }
+
+            $conflict = $conflictQuery->lockForUpdate()->first();
+
+            if ($conflict) {
+                throw new InvalidArgumentException('A commitment already exists for this user/beneficiary and cycle.');
+            }
+
+            if ($status === 'active') {
+                $overlapQuery = ContributionCommitment::query()
+                    ->where('id', '!=', $commitment->id)
+                    ->where('user_id', $userId)
+                    ->where('status', 'active')
+                    ->where(function ($q) use ($cycleStart, $cycleEnd) {
+                        $q->where('cycle_end_period', '>=', $cycleStart)
+                            ->where('cycle_start_period', '<=', $cycleEnd);
+                    });
+
+                if (is_null($beneficiaryId)) {
+                    $overlapQuery->whereNull('beneficiary_id');
+                } else {
+                    $overlapQuery->where('beneficiary_id', $beneficiaryId);
+                }
+
+                $overlapQuery->lockForUpdate()->update([
+                    'status' => 'expired',
+                ]);
+            }
+
+            $commitment->update([
+                'user_id' => $userId,
+                'beneficiary_id' => $beneficiaryId,
+                'amount' => $amount,
+                'cycle_start_period' => $cycleStart,
+                'cycle_end_period' => $cycleEnd,
+                'cycle_months' => $cycleMonths,
+                'status' => $status,
+                'activated_at' => $activatedAt ?? $commitment->activated_at,
+            ]);
+
+            return $commitment->refresh();
+        });
+    }
+    private function validateOwner(int $userId, ?int $beneficiaryId): void
+    {
+        if ($userId <= 0) {
+            throw new InvalidArgumentException('userId is required and must be a valid positive integer.');
+        }
+
+        if (!is_null($beneficiaryId) && $beneficiaryId <= 0) {
+            throw new InvalidArgumentException('beneficiaryId must be a valid positive integer when provided.');
         }
     }
 
     private function assertPeriodKey(string $periodKey): void
     {
-        if (!preg_match('/^\d{4}-\d{2}$/', $periodKey)) {
+        if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $periodKey)) {
             throw new InvalidArgumentException("Period key must be YYYY-MM, got: {$periodKey}");
         }
     }

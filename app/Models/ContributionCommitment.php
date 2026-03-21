@@ -37,13 +37,18 @@ class ContributionCommitment extends Model
         return $this->belongsTo(User::class);
     }
 
+    public function beneficiary()
+    {
+        return $this->belongsTo(Beneficiary::class);
+    }
+
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
     }
 
     /* =========================
-       Scopes (optional helpers)
+       Scopes
        ========================= */
 
     public function scopeActive(Builder $query): Builder
@@ -51,14 +56,44 @@ class ContributionCommitment extends Model
         return $query->where('status', 'active');
     }
 
+    public function scopeExpired(Builder $query): Builder
+    {
+        return $query->where('status', 'expired');
+    }
+
     public function scopeForUser(Builder $query, int $userId): Builder
     {
         return $query->where('user_id', $userId);
     }
 
+    public function scopeForBeneficiary(Builder $query, int $beneficiaryId): Builder
+    {
+        return $query->where('beneficiary_id', $beneficiaryId);
+    }
+
+    public function scopeUserLevel(Builder $query): Builder
+    {
+        return $query->whereNull('beneficiary_id');
+    }
+
+    public function scopeBeneficiaryLevel(Builder $query): Builder
+    {
+        return $query->whereNotNull('beneficiary_id');
+    }
+
+    public function scopeForOwner(Builder $query, int $userId, ?int $beneficiaryId = null): Builder
+    {
+        $query->where('user_id', $userId);
+
+        if (is_null($beneficiaryId)) {
+            return $query->whereNull('beneficiary_id');
+        }
+
+        return $query->where('beneficiary_id', $beneficiaryId);
+    }
+
     public function scopeCoversPeriod(Builder $query, string $periodKey): Builder
     {
-        // periodKey = 'YYYY-MM'
         return $query
             ->where('cycle_start_period', '<=', $periodKey)
             ->where('cycle_end_period', '>=', $periodKey);
@@ -70,10 +105,27 @@ class ContributionCommitment extends Model
 
     public function isActive(): bool
     {
-        return ($this->status ?? 'active') === 'active';
+        return $this->status === 'active';
     }
+
+    public function isExpired(): bool
+    {
+        return $this->status === 'expired';
+    }
+
+    public function isUserLevel(): bool
+    {
+        return is_null($this->beneficiary_id);
+    }
+
+    public function isBeneficiaryLevel(): bool
+    {
+        return !is_null($this->beneficiary_id);
+    }
+
     public function covers(string $periodKey): bool
     {
-        return $this->cycle_start_period <= $periodKey && $this->cycle_end_period >= $periodKey;
+        return $this->cycle_start_period <= $periodKey
+            && $this->cycle_end_period >= $periodKey;
     }
 }

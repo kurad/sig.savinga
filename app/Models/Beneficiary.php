@@ -55,4 +55,9 @@ class Beneficiary extends Model
     {
         return $this->hasMany(Loan::class);
     }
+
+    public function commitments(): HasMany
+    {
+        return $this->hasMany(ContributionCommitment::class);
+    }
 }
