@@ -22,9 +22,13 @@ class DueDateController extends Controller
     {
         $me = $request->user();
 
-        // Get active commitment for current period (or fallback to latest active)
         $periodKey = now('Africa/Kigali')->format('Y-m');
-        $commitment = $this->commitmentService->activeForPeriod($me->id, $periodKey);
+
+        $commitment = $this->commitmentService->activeForPeriod(
+            userId: (int) $me->id,
+            beneficiaryId: null,
+            periodKey: $periodKey
+        );
 
         if (!$commitment) {
             return response()->json([
@@ -37,10 +41,11 @@ class DueDateController extends Controller
             memberId: (int) $me->id,
             commitmentAmount: (float) $commitment->amount
         );
-        // ✅ commitment for the DUE period (not necessarily "now")
+
         $dueCommitment = $this->commitmentService->activeForPeriod(
-            (int) $me->id,
-            (string) $data['next_due_period']
+            userId: (int) $me->id,
+            beneficiaryId: null,
+            periodKey: (string) $data['next_due_period']
         );
 
         return response()->json([
@@ -51,7 +56,7 @@ class DueDateController extends Controller
                     'amount' => $dueCommitment ? (float) $dueCommitment->amount : null,
                     'status' => $dueCommitment?->status,
                 ],
-            ]
+            ],
         ]);
     }
 
@@ -60,13 +65,17 @@ class DueDateController extends Controller
      */
     public function memberNextDue(Request $request, User $user)
     {
-        // Authorization: only admin/treasurer
         if (!in_array($request->user()->role, ['admin', 'treasurer'], true)) {
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
         $periodKey = now('Africa/Kigali')->format('Y-m');
-        $commitment = $this->commitmentService->activeForPeriod($user->id, $periodKey);
+
+        $commitment = $this->commitmentService->activeForPeriod(
+            userId: (int) $user->id,
+            beneficiaryId: null,
+            periodKey: $periodKey
+        );
 
         if (!$commitment) {
             return response()->json([
@@ -79,9 +88,11 @@ class DueDateController extends Controller
             memberId: (int) $user->id,
             commitmentAmount: (float) $commitment->amount
         );
+
         $dueCommitment = $this->commitmentService->activeForPeriod(
-            (int) $user->id,
-            (string) $data['next_due_period']
+            userId: (int) $user->id,
+            beneficiaryId: null,
+            periodKey: (string) $data['next_due_period']
         );
 
         return response()->json([
