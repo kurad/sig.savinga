@@ -33,12 +33,21 @@ class PenaltyService
 
     protected function validateOwner(?int $userId, ?int $beneficiaryId): void
     {
-        $hasUser = !is_null($userId);
-        $hasBeneficiary = !is_null($beneficiaryId);
-
-        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
+        if (is_null($userId) && is_null($beneficiaryId)) {
             throw new InvalidArgumentException(
-                'A penalty must belong to either a user or a beneficiary.'
+                'A penalty must belong to at least a user or a beneficiary.'
+            );
+        }
+
+        if (!is_null($userId) && $userId <= 0) {
+            throw new InvalidArgumentException(
+                'user_id must be a valid positive integer.'
+            );
+        }
+
+        if (!is_null($beneficiaryId) && $beneficiaryId <= 0) {
+            throw new InvalidArgumentException(
+                'beneficiary_id must be a valid positive integer.'
             );
         }
     }
@@ -58,8 +67,8 @@ class PenaltyService
         $this->validateOwner($userId, $beneficiaryId);
 
         return Penalty::query()
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+            ->when(!is_null($userId), fn($q) => $q->where('user_id', $userId))
+            ->when(!is_null($beneficiaryId), fn($q) => $q->where('beneficiary_id', $beneficiaryId));
     }
 
     protected function isLateContributionPenaltyExempt(string $periodKey, Carbon $paidDate): bool

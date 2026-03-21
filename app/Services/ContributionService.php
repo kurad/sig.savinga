@@ -158,7 +158,7 @@ class ContributionService
             'amount' => $amount,
             'allocations' => $allocations,
             'months_affected' => count($allocations),
-            'total_allocated' => round(array_sum(array_map(fn ($a) => (float) $a['allocated'], $allocations)), 2),
+            'total_allocated' => round(array_sum(array_map(fn($a) => (float) $a['allocated'], $allocations)), 2),
         ];
     }
 
@@ -335,10 +335,11 @@ class ContributionService
                         contributionId: $envelope->id,
                         recordedBy: $recordedBy,
                         periodKey: $cursorPeriodKey,
-                        paidDate: $paid->toDateString()
+                        paidDate: $paid->toDateString(),
+                        principalBase: $monthlyTarget
                     );
 
-                    if ($penalty) {
+                    if ($penalty && (float) $penalty->amount > 0) {
                         $envelope->penalty_amount = (float) $penalty->amount;
                         $envelope->save();
                         $penaltyAppliedNow = true;
@@ -590,10 +591,13 @@ class ContributionService
                 userId: $userId,
                 beneficiaryId: $beneficiaryId,
                 contributionId: $contribution->id,
-                recordedBy: $recordedBy
+                recordedBy: $recordedBy,
+                periodKey: $periodKey,
+                principalBase: (float) $commitment->amount,
+                date: $expected->toDateString()
             );
 
-            if ($penalty) {
+            if ($penalty && (float) $penalty->amount > 0) {
                 $contribution->update(['penalty_amount' => (float) $penalty->amount]);
             }
 
@@ -789,10 +793,11 @@ class ContributionService
                     contributionId: $envelope->id,
                     recordedBy: $recordedBy,
                     periodKey: $periodKey,
-                    paidDate: $paid->toDateString()
+                    paidDate: $paid->toDateString(),
+                    principalBase: $monthlyTarget
                 );
 
-                if ($penalty) {
+                if ($penalty && (float) $penalty->amount > 0) {
                     $envelope->penalty_amount = (float) $penalty->amount;
                     $envelope->save();
                 }
