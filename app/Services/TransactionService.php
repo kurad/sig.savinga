@@ -12,7 +12,7 @@ class TransactionService
         string $type,
         float $debit,
         float $credit,
-        ?int $userId,
+        int $userId,
         string $reference,
         int $createdBy,
         ?string $sourceType = null,
@@ -45,23 +45,30 @@ class TransactionService
         ]);
     }
 
-    protected function validateOwner(?int $userId, ?int $beneficiaryId): void
+    protected function validateOwner(int $userId, ?int $beneficiaryId): void
     {
-        $hasUser = !is_null($userId);
-        $hasBeneficiary = !is_null($beneficiaryId);
+        if ($userId <= 0) {
+            throw new Exception('Transaction user_id is required and must be a valid positive integer.');
+        }
 
-        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
-            throw new Exception('Transaction must belong to either a user or a beneficiary.');
+        if (!is_null($beneficiaryId) && $beneficiaryId <= 0) {
+            throw new Exception('Transaction beneficiary_id must be a valid positive integer when provided.');
         }
     }
 
-    protected function ownerQuery(?int $userId, ?int $beneficiaryId): Builder
+    protected function ownerQuery(int $userId, ?int $beneficiaryId = null): Builder
     {
         $this->validateOwner($userId, $beneficiaryId);
 
-        return Transaction::query()
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+        $query = Transaction::query()->where('user_id', $userId);
+
+        if (is_null($beneficiaryId)) {
+            $query->whereNull('beneficiary_id');
+        } else {
+            $query->where('beneficiary_id', $beneficiaryId);
+        }
+
+        return $query;
     }
 
     public function groupBalance(): float
@@ -72,7 +79,7 @@ class TransactionService
         return $credit - $debit;
     }
 
-    public function memberSavings(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberSavings(int $userId, ?int $beneficiaryId = null): float
     {
         $credit = (float) $this->ownerQuery($userId, $beneficiaryId)
             ->whereIn('type', ['opening_balance', 'opening_savings', 'contribution', 'profit'])
@@ -85,25 +92,21 @@ class TransactionService
         return $credit - $debit;
     }
 
-    public function memberSavingsBaseForLoanLimit(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberSavingsBaseForLoanLimit(int $userId, ?int $beneficiaryId = null): float
     {
         return (float) $this->ownerQuery($userId, $beneficiaryId)
             ->whereIn('type', ['opening_savings', 'opening_balance', 'contribution', 'profit'])
             ->sum('credit');
     }
 
-    public function contributedMonthsCountFromLedger(?int $userId = null, ?int $beneficiaryId = null): int
+    public function contributedMonthsCountFromLedger(int $userId, ?int $beneficiaryId = null): int
     {
-        return $this->ownerQuery($userId, $beneficiaryId)
+        return (int) $this->ownerQuery($userId, $beneficiaryId)
             ->where('type', 'contribution')
             ->distinct('reference')
             ->count('reference');
     }
-
-    /**
-     * Net balance across all ledger entries (credits - debits).
-     */
-    public function memberNetBalance(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberNetBalance(int $userId, ?int $beneficiaryId = null): float
     {
         $credit = (float) $this->ownerQuery($userId, $beneficiaryId)->sum('credit');
         $debit  = (float) $this->ownerQuery($userId, $beneficiaryId)->sum('debit');
@@ -111,7 +114,7 @@ class TransactionService
         return $credit - $debit;
     }
 
-    public function memberLoanBalance(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberLoanBalance(int $userId, ?int $beneficiaryId = null): float
     {
         $loanDisbursed = (float) $this->ownerQuery($userId, $beneficiaryId)
             ->whereIn('type', ['opening_loan', 'loan_disbursement'])
@@ -124,14 +127,14 @@ class TransactionService
         return max(0, $loanDisbursed - $loanRepaid);
     }
 
-    public function memberLoanIssuedBase(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberLoanIssuedBase(int $userId, ?int $beneficiaryId = null): float
     {
         return (float) $this->ownerQuery($userId, $beneficiaryId)
             ->whereIn('type', ['opening_loan', 'loan_disbursement'])
             ->sum('debit');
     }
 
-    public function memberLoanRepaidTotal(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberLoanRepaidTotal(int $userId, ?int $beneficiaryId = null): float
     {
         return (float) $this->ownerQuery($userId, $beneficiaryId)
             ->where('type', 'loan_repayment')
@@ -156,7 +159,7 @@ class TransactionService
         return $assessed - $cleared;
     }
 
-    public function memberPenaltyOutstanding(?int $userId = null, ?int $beneficiaryId = null): float
+    public function memberPenaltyOutstanding(int $userId, ?int $beneficiaryId = null): float
     {
         $assessed = (float) $this->ownerQuery($userId, $beneficiaryId)
             ->where('type', 'penalty')
@@ -185,8 +188,7 @@ class TransactionService
             + ($penaltiesAssessed - $penaltiesWaived)
             + $explicitProfit;
     }
-
-    public function savingsBaseForLoanLimit(?int $userId = null, ?int $beneficiaryId = null): float
+    public function savingsBaseForLoanLimit(int $userId, ?int $beneficiaryId = null): float
     {
         return 0.7 * $this->memberSavings($userId, $beneficiaryId);
     }

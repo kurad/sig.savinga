@@ -3,7 +3,9 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ContributionAllocation extends Model
 {
@@ -45,18 +47,43 @@ class ContributionAllocation extends Model
         'penalty_applied_now' => 'boolean',
     ];
 
-    public function batch()
+    public function batch(): BelongsTo
     {
         return $this->belongsTo(ContributionBatch::class, 'contribution_batch_id');
     }
 
-    public function contribution()
+    public function contribution(): BelongsTo
     {
         return $this->belongsTo(Contribution::class);
     }
 
-    public function transaction()
+    public function transaction(): BelongsTo
     {
         return $this->belongsTo(Transaction::class);
+    }
+
+    public function scopeForPeriod(Builder $query, string $periodKey): Builder
+    {
+        return $query->where('period_key', $periodKey);
+    }
+
+    public function scopeCreatedNew(Builder $query): Builder
+    {
+        return $query->where('created_new', true);
+    }
+
+    public function scopePenaltyApplied(Builder $query): Builder
+    {
+        return $query->where('penalty_applied_now', true);
+    }
+
+    public function didCreateNewContribution(): bool
+    {
+        return (bool) $this->created_new;
+    }
+
+    public function didApplyPenalty(): bool
+    {
+        return (bool) $this->penalty_applied_now;
     }
 }

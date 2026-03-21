@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Contribution;
 use App\Models\ContributionBatch;
+use App\Models\ContributionAllocation;
 use App\Models\FinancialYearRule;
 use App\Models\MemberFinancialYear;
 use App\Models\Penalty;
@@ -27,7 +28,7 @@ class ContributionService
     ) {}
 
     public function previewAllocation(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         float $amount,
         ?string $expectedDate,
@@ -127,7 +128,7 @@ class ContributionService
                 'year_key'               => (string) $fy->year_key,
                 'period_key'             => $cursorPeriodKey,
                 'monthly_target'         => $monthlyTarget,
-                'before_amount'          => $beforeAmount,
+                'before_amount'          => round((float) $beforeAmount, 2),
                 'allocated'              => round((float) $alloc, 2),
                 'after_amount'           => round((float) $afterAmount, 2),
                 'remaining_needed_after' => round((float) $remainingNeededAfter, 2),
@@ -162,7 +163,7 @@ class ContributionService
     }
 
     public function record(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         float $amount,
         ?string $expectedDate,
@@ -357,7 +358,7 @@ class ContributionService
                     sourceId: $envelope->id
                 );
 
-                \App\Models\ContributionAllocation::create([
+                ContributionAllocation::create([
                     'contribution_batch_id' => $batch->id,
                     'contribution_id' => $envelope->id,
                     'transaction_id' => $tx->id ?? null,
@@ -509,7 +510,7 @@ class ContributionService
     }
 
     public function markMissed(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         string $expectedDate,
         int $recordedBy
@@ -530,7 +531,7 @@ class ContributionService
     }
 
     public function markMissedByPeriod(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         string $period,
         int $recordedBy,
@@ -601,7 +602,7 @@ class ContributionService
     }
 
     public function totalContributionsForOwner(
-        ?int $userId = null,
+        int $userId,
         ?int $beneficiaryId = null,
         ?int $financialYearRuleId = null
     ): float {
@@ -618,7 +619,7 @@ class ContributionService
     }
 
     public function contributedMonthsCount(
-        ?int $userId = null,
+        int $userId,
         ?int $beneficiaryId = null,
         ?int $financialYearRuleId = null
     ): int {
@@ -637,7 +638,7 @@ class ContributionService
     }
 
     public function openingBalanceForOwner(
-        ?int $userId = null,
+        int $userId,
         ?int $beneficiaryId = null,
         ?int $financialYearRuleId = null
     ): float {
@@ -664,7 +665,7 @@ class ContributionService
     }
 
     public function savingsBaseForLoanLimit(
-        ?int $userId = null,
+        int $userId,
         ?int $beneficiaryId = null,
         ?int $financialYearRuleId = null
     ): float {
@@ -675,7 +676,7 @@ class ContributionService
     }
 
     public function recordSinglePeriod(
-        ?int $userId,
+        int $userId,
         ?int $beneficiaryId,
         float $amount,
         ?string $expectedDate,
@@ -823,7 +824,7 @@ class ContributionService
     }
 
     public function contributedMonthsCountFromContributions(
-        ?int $userId = null,
+        int $userId,
         ?int $beneficiaryId = null
     ): int {
         $this->validateOwner($userId, $beneficiaryId);
@@ -848,7 +849,7 @@ class ContributionService
                 throw new InvalidArgumentException('This contribution batch was already reversed.');
             }
 
-            $this->ensureOwnerFyOpen($batch->user_id, $batch->beneficiary_id, (int) $batch->financial_year_rule_id);
+            $this->ensureOwnerFyOpen((int) $batch->user_id, $batch->beneficiary_id, (int) $batch->financial_year_rule_id);
 
             $reversedCount = 0;
             $reversedAmount = 0.0;
@@ -874,7 +875,7 @@ class ContributionService
                                 type: 'contribution_reversal',
                                 debit: $reverseDebit,
                                 credit: $reverseCredit,
-                                userId: $tx->user_id,
+                                userId: (int) $tx->user_id,
                                 beneficiaryId: $tx->beneficiary_id,
                                 reference: 'Reversal of transaction ID ' . $tx->id . ' from contribution batch ID ' . $batch->id,
                                 createdBy: $reversedBy,
@@ -923,7 +924,7 @@ class ContributionService
 
             return [
                 'batch_id' => (int) $batch->id,
-                'user_id' => $batch->user_id,
+                'user_id' => (int) $batch->user_id,
                 'beneficiary_id' => $batch->beneficiary_id,
                 'financial_year_rule_id' => (int) $batch->financial_year_rule_id,
                 'reversed_allocations' => $reversedCount,
@@ -936,7 +937,7 @@ class ContributionService
     }
 
     public function undoLastBatchForOwner(
-        ?int $userId = null,
+        int $userId,
         ?int $beneficiaryId = null,
         ?int $financialYearRuleId = null,
         int $reversedBy = 0
@@ -944,9 +945,14 @@ class ContributionService
         $this->validateOwner($userId, $beneficiaryId);
 
         $q = ContributionBatch::query()
-            ->when(!is_null($userId), fn ($qq) => $qq->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($qq) => $qq->where('beneficiary_id', $beneficiaryId))
+            ->where('user_id', $userId)
             ->whereNull('reversed_at');
+
+        if (is_null($beneficiaryId)) {
+            $q->whereNull('beneficiary_id');
+        } else {
+            $q->where('beneficiary_id', $beneficiaryId);
+        }
 
         if ($financialYearRuleId) {
             $q->where('financial_year_rule_id', $financialYearRuleId);
@@ -992,7 +998,7 @@ class ContributionService
                         type: 'penalty_reversal',
                         debit: $reverseDebit,
                         credit: $reverseCredit,
-                        userId: $penalty->user_id,
+                        userId: (int) $penalty->user_id,
                         beneficiaryId: $penalty->beneficiary_id,
                         reference: 'Reversal of penalty ID ' . $penalty->id . ' from contribution batch ID ' . $batchId,
                         createdBy: $reversedBy,
@@ -1016,7 +1022,7 @@ class ContributionService
             : FinancialYearRule::where('is_active', true)->firstOrFail();
     }
 
-    private function ensureOwnerFyOpen(?int $userId, ?int $beneficiaryId, int $fyId): MemberFinancialYear
+    private function ensureOwnerFyOpen(int $userId, ?int $beneficiaryId, int $fyId): MemberFinancialYear
     {
         $this->validateOwner($userId, $beneficiaryId);
 
@@ -1072,28 +1078,33 @@ class ContributionService
         }
     }
 
-    private function validateOwner(?int $userId, ?int $beneficiaryId): void
+    private function validateOwner(int $userId, ?int $beneficiaryId): void
     {
-        $hasUser = !is_null($userId);
-        $hasBeneficiary = !is_null($beneficiaryId);
+        if ($userId <= 0) {
+            throw new InvalidArgumentException('user_id is required and must be a valid positive integer.');
+        }
 
-        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
-            throw new InvalidArgumentException(
-                'A contribution must belong to either a user or a beneficiary.'
-            );
+        if (!is_null($beneficiaryId) && $beneficiaryId <= 0) {
+            throw new InvalidArgumentException('beneficiary_id must be a valid positive integer when provided.');
         }
     }
 
-    private function ownerContributionQuery(?int $userId, ?int $beneficiaryId): Builder
+    private function ownerContributionQuery(int $userId, ?int $beneficiaryId): Builder
     {
         $this->validateOwner($userId, $beneficiaryId);
 
-        return Contribution::query()
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+        $query = Contribution::query()->where('user_id', $userId);
+
+        if (is_null($beneficiaryId)) {
+            $query->whereNull('beneficiary_id');
+        } else {
+            $query->where('beneficiary_id', $beneficiaryId);
+        }
+
+        return $query;
     }
 
-    private function ownerPayload(?int $userId, ?int $beneficiaryId): array
+    private function ownerPayload(int $userId, ?int $beneficiaryId): array
     {
         $this->validateOwner($userId, $beneficiaryId);
 
