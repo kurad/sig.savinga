@@ -31,7 +31,9 @@ class IncomeController extends Controller
             incomeDate: $request->input('income_date'),
             recordedBy: $request->user()->id,
             category: $request->input('category'),
-            description: $request->input('description')
+            description: $request->input('description'),
+            userId: $request->input('user_id'),
+            beneficiaryId: $request->input('beneficiary_id')
         );
 
         return response()->json([

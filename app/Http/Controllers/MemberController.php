@@ -5,11 +5,13 @@ namespace App\Http\Controllers;
 use App\Http\Requests\Members\StoreMemberRequest;
 use App\Http\Requests\Members\ToggleMemberStatusRequest;
 use App\Http\Requests\Members\UpdateMemberRequest;
+use App\Imports\MembersImport;
 use App\Models\ContributionCommitment;
 use App\Models\OpeningBalance;
 use App\Models\User;
 use App\Services\MemberService;
 use Illuminate\Http\Request;
+use Maatwebsite\Excel\Facades\Excel;
 
 class MemberController extends Controller
 {
@@ -23,13 +25,26 @@ class MemberController extends Controller
             'as_of_period' => ['nullable', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
         ]);
 
-        $period = $request->query('as_of_period'); // reuse same param for both features
+        $period = $request->query('as_of_period');
 
-        $query = User::query()->select('id', 'name', 'email', 'phone', 'role', 'is_active', 'created_at');
+        $query = User::query()->select(
+            'id',
+            'name',
+            'email',
+            'phone',
+            'role',
+            'is_active',
+            'created_at',
+            'joined_at',
+            'registration_fee_required',
+            'registration_fee_amount',
+            'registration_fee_status',
+            'registration_paid_at',
+            'registration_recorded_by',
+            'registration_note',
+            'source'
+        );
 
-        // -------------------------
-        // OPENING BALANCE FLAGS
-        // -------------------------
         $query->addSelect([
             'opening_balance_any' => OpeningBalance::query()
                 ->whereColumn('opening_balances.user_id', 'users.id')
@@ -45,9 +60,6 @@ class MemberController extends Controller
                 ->limit(1),
         ]);
 
-        // -------------------------
-        // COMMITMENT FLAGS
-        // -------------------------
         $query->addSelect([
             'commitment_any' => ContributionCommitment::query()
                 ->whereColumn('contribution_commitments.user_id', 'users.id')
@@ -55,7 +67,6 @@ class MemberController extends Controller
                 ->limit(1),
         ]);
 
-        // Active commitment for the requested period (only if period provided)
         if ($period) {
             $query->addSelect([
                 'commitment_active' => ContributionCommitment::query()
@@ -86,7 +97,6 @@ class MemberController extends Controller
             ]);
         }
 
-        // filters...
         if ($request->filled('role')) {
             $query->where('role', $request->query('role'));
         }
@@ -104,9 +114,6 @@ class MemberController extends Controller
             });
         }
 
-        // -------------------------
-        // BENEFICIARIES WITH FLAGS
-        // -------------------------
         $query->with([
             'beneficiaries' => function ($bq) use ($period) {
                 $bq->select(
@@ -117,10 +124,15 @@ class MemberController extends Controller
                     'relationship',
                     'is_active',
                     'joined_at',
-                    'created_at'
+                    'created_at',
+                    'registration_fee_required',
+                    'registration_fee_amount',
+                    'registration_fee_status',
+                    'registration_paid_at',
+                    'registration_recorded_by',
+                    'registration_note'
                 );
 
-                // Opening balance flags for beneficiary
                 $bq->addSelect([
                     'opening_balance_any' => OpeningBalance::query()
                         ->whereColumn('opening_balances.beneficiary_id', 'beneficiaries.id')
@@ -136,7 +148,6 @@ class MemberController extends Controller
                         ->limit(1),
                 ]);
 
-                // Commitment flags for beneficiary
                 $bq->addSelect([
                     'commitment_any' => ContributionCommitment::query()
                         ->whereColumn('contribution_commitments.beneficiary_id', 'beneficiaries.id')
@@ -177,6 +188,7 @@ class MemberController extends Controller
                 $bq->orderBy('name');
             }
         ]);
+
         $page = $query->orderBy('name')->paginate(15);
 
         $page->getCollection()->transform(function ($u) use ($period) {
@@ -205,13 +217,31 @@ class MemberController extends Controller
         return response()->json([
             'message' => 'Member created successfully',
             'data' => $result['user'],
-            'generated_password' => $result['plain_password'], // show once if auto generated
+            'generated_password' => $result['plain_password'],
         ], 201);
     }
 
     public function show(User $user)
     {
-        return response()->json($user->only(['id', 'name', 'email', 'phone', 'role', 'is_active', 'created_at']));
+        return response()->json(
+            $user->only([
+                'id',
+                'name',
+                'email',
+                'phone',
+                'role',
+                'is_active',
+                'created_at',
+                'joined_at',
+                'registration_fee_required',
+                'registration_fee_amount',
+                'registration_fee_status',
+                'registration_paid_at',
+                'registration_recorded_by',
+                'registration_note',
+                'source'
+            ])
+        );
     }
 
     public function update(UpdateMemberRequest $request, User $user)
@@ -220,7 +250,22 @@ class MemberController extends Controller
 
         return response()->json([
             'message' => 'Member updated successfully',
-            'data' => $updated->only(['id', 'name', 'email', 'phone', 'role', 'is_active']),
+            'data' => $updated->only([
+                'id',
+                'name',
+                'email',
+                'phone',
+                'role',
+                'is_active',
+                'joined_at',
+                'registration_fee_required',
+                'registration_fee_amount',
+                'registration_fee_status',
+                'registration_paid_at',
+                'registration_recorded_by',
+                'registration_note',
+                'source'
+            ]),
         ]);
     }
 
@@ -231,6 +276,32 @@ class MemberController extends Controller
         return response()->json([
             'message' => 'Member status updated',
             'data' => $updated->only(['id', 'name', 'email', 'phone', 'role', 'is_active']),
+        ]);
+    }
+
+    public function importExcel(Request $request)
+    {
+        $request->validate([
+            'file' => ['required', 'file', 'mimes:xlsx,xls,csv'],
+        ]);
+
+        $sheets = Excel::toArray(new MembersImport, $request->file('file'));
+        $rows = $sheets[0] ?? [];
+
+        if (empty($rows)) {
+            return response()->json([
+                'message' => 'The uploaded file contains no data.',
+            ], 422);
+        }
+
+        $result = $this->memberService->importFromExcel(
+            rows: $rows,
+            recordedBy: $request->user()->id
+        );
+
+        return response()->json([
+            'message' => 'Members imported successfully.',
+            'data' => $result,
         ]);
     }
 }
