@@ -25,7 +25,7 @@ return [
         // 'http://localhost:8081', 
         // 'http://127.0.0.1:8081',
         'https://savinga.rw',
-        'https://demo.savinga.rw',
+        'https://sig.savinga.rw',
         ],
 
     'allowed_origins_patterns' => [],

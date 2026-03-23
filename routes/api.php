@@ -21,6 +21,7 @@ use App\Http\Controllers\OtpAuthController;
 use App\Http\Controllers\PenaltyController;
 use App\Http\Controllers\ProfitCycleController;
 use App\Http\Controllers\StatementController;
+use App\Http\Controllers\SystemRuleController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -180,5 +181,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::post('/member-financial-years/upsert', [MemberFinancialYearController::class, 'upsert']);
         Route::get('/member-financial-years', [MemberFinancialYearController::class, 'show']);
+
+        Route::get('/system-rules', [SystemRuleController::class, 'show']);
+        Route::put('/system-rules', [SystemRuleController::class, 'update']);
     });
 });
