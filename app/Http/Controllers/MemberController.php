@@ -279,7 +279,7 @@ class MemberController extends Controller
         ]);
     }
 
-    public function importExcel(Request $request)
+    public function importFromExcel(Request $request)
     {
         $request->validate([
             'file' => ['required', 'file', 'mimes:xlsx,xls,csv'],
