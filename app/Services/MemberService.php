@@ -2,16 +2,19 @@
 
 namespace App\Services;
 
+use App\Models\FinancialYearRule;
 use App\Models\User;
-use Illuminate\Support\Str;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 
 class MemberService
 {
     public function __construct(
-        protected IncomeService $incomeService
+        protected OpeningBalanceService $openingBalanceService,
+        protected CommitmentService $commitmentService
     ) {}
 
     public function create(array $data, int $recordedBy): array
@@ -38,7 +41,9 @@ class MemberService
 
         return [
             'user' => $user,
-            'plain_password' => isset($data['password']) ? null : $password,
+            'plain_password' => array_key_exists('password', $data) && $data['password']
+    ? null
+    : $password,
         ];
     }
 
@@ -61,88 +66,40 @@ class MemberService
         return $user;
     }
 
-    public function recordRegistrationFee(User $user, int $recordedBy, ?string $incomeDate = null): User
-    {
-        if (!$user->registration_fee_required) {
-            throw new InvalidArgumentException('Registration fee is not applicable for this member.');
-        }
-
-        if ($user->registration_fee_status === 'paid') {
-            throw new InvalidArgumentException('Registration fee has already been paid.');
-        }
-
-        if ($user->registration_fee_status === 'waived') {
-            throw new InvalidArgumentException('Registration fee was waived for this member.');
-        }
-
-        DB::transaction(function () use ($user, $recordedBy, $incomeDate) {
-            $this->incomeService->record(
-                amount: (float) $user->registration_fee_amount,
-                incomeDate: $incomeDate ?? now()->toDateString(),
-                recordedBy: $recordedBy,
-                category: 'Registration Fee',
-                description: "Registration fee for new member: {$user->name}"
-            );
-
-            $user->update([
-                'registration_fee_status' => 'paid',
-                'registration_paid_at' => now(),
-                'registration_recorded_by' => $recordedBy,
-            ]);
-        });
-
-        return $user->fresh();
-    }
-
-    public function waiveRegistrationFee(User $user, int $recordedBy, ?string $note = null): User
-    {
-        if (!$user->registration_fee_required) {
-            throw new InvalidArgumentException('Registration fee is not applicable for this member.');
-        }
-
-        if ($user->registration_fee_status === 'paid') {
-            throw new InvalidArgumentException('Cannot waive a registration fee that is already paid.');
-        }
-
-        $user->update([
-            'registration_fee_status' => 'waived',
-            'registration_note' => $note ?? "Waived by user ID {$recordedBy}",
-            'registration_recorded_by' => $recordedBy,
-        ]);
-
-        return $user->fresh();
-    }
-
     public function importFromExcel(array $rows, int $recordedBy): array
     {
         $created = [];
         $skipped = [];
         $errors = [];
 
-        DB::beginTransaction();
+        $fy = $this->resolveActiveFinancialYear();
+        foreach ($rows as $index => $row) {
+            $rowNumber = $index + 2; // row 1 is headings
 
-        try {
-            foreach ($rows as $index => $row) {
-                $rowNumber = $index + 2; // assuming row 1 is heading
-
-                try {
-                    $name  = trim((string) ($row['name'] ?? ''));
+            try {
+                DB::transaction(function () use ($row, $rowNumber, $recordedBy, $fy, &$created, &$skipped) {
+                    $name = trim((string) ($row['name'] ?? ''));
                     $email = trim((string) ($row['email'] ?? ''));
                     $phone = trim((string) ($row['phone'] ?? ''));
-                    $role  = trim((string) ($row['role'] ?? 'member'));
-                    $joinedAt = !empty($row['joined_at']) ? $row['joined_at'] : now()->toDateString();
-                    $registrationFeeAmount = !empty($row['registration_fee_amount'])
-                        ? (float) $row['registration_fee_amount']
-                        : 10000;
-                    $registrationNote = $row['registration_note'] ?? null;
-                    $password = !empty($row['password']) ? (string) $row['password'] : null;
+                    $role = trim((string) ($row['role'] ?? 'member'));
+                    $joinedAt = !empty($row['joined_at'])
+                        ? Carbon::parse($row['joined_at'])->toDateString()
+                        : now()->toDateString();
+
+                    $openingBalanceAmount = isset($row['opening_balance_amount']) && $row['opening_balance_amount'] !== ''
+                        ? (float) $row['opening_balance_amount']
+                        : null;
+
+                    $commitmentAmount = isset($row['commitment_amount']) && $row['commitment_amount'] !== ''
+                        ? (float) $row['commitment_amount']
+                        : null;
 
                     if ($name === '') {
                         $skipped[] = [
                             'row' => $rowNumber,
                             'reason' => 'Name is required.',
                         ];
-                        continue;
+                        return;
                     }
 
                     if ($email !== '' && User::where('email', $email)->exists()) {
@@ -150,7 +107,7 @@ class MemberService
                             'row' => $rowNumber,
                             'reason' => "Email already exists: {$email}",
                         ];
-                        continue;
+                        return;
                     }
 
                     if ($phone !== '' && User::where('phone', $phone)->exists()) {
@@ -158,52 +115,105 @@ class MemberService
                             'row' => $rowNumber,
                             'reason' => "Phone already exists: {$phone}",
                         ];
-                        continue;
+                        return;
+                    }
+
+                    if ($openingBalanceAmount < 0) {
+                        throw new InvalidArgumentException('Opening balance amount cannot be negative.');
+                    }
+
+                    if ($commitmentAmount < 0) {
+                        throw new InvalidArgumentException('Commitment amount cannot be negative.');
                     }
 
                     $result = $this->create([
                         'name' => $name,
                         'email' => $email ?: null,
                         'phone' => $phone ?: null,
-                        'role' => in_array($role, ['admin', 'treasurer', 'member'], true) ? $role : 'member',
+                        'role' => in_array($role, ['admin', 'treasurer', 'member'], true)
+                            ? $role
+                            : 'member',
                         'joined_at' => $joinedAt,
-                        'registration_fee_amount' => $registrationFeeAmount,
-                        'registration_note' => $registrationNote,
-                        'password' => $password,
+                        'source' => 'excel',
                     ], $recordedBy);
+
+                    $user = $result['user'];
+
+                    if ($openingBalanceAmount > 0) {
+                        $this->openingBalanceService->setOpeningBalance([
+                            'user_id' => $user->id,
+                            'as_of_period' => 'FA' . $fy->year_key,
+                            'amount' => $openingBalanceAmount,
+                            'note' => 'Imported from Excel',
+                        ], $recordedBy);
+                    }
+
+                    if ($commitmentAmount > 0) {
+                       
+                        $this->commitmentService->setForCycle(
+                            userId: $user->id,
+                            beneficiaryId: null,
+                            amount: $commitmentAmount,
+                            cycleStart: $fy->start_period,
+                            cycleEnd: $fy->end_period,
+                            cycleMonths: $fy->cycle_months,
+                            createdBy: $recordedBy
+                        );
+                    }
 
                     $created[] = [
                         'row' => $rowNumber,
-                        'name' => $result['user']->name,
-                        'email' => $result['user']->email,
-                        'phone' => $result['user']->phone,
+                        'name' => $user->name,
+                        'email' => $user->email,
+                        'phone' => $user->phone,
                         'plain_password' => $result['plain_password'],
+                        'opening_balance_imported' => $openingBalanceAmount > 0,
+                        'commitment_imported' => $commitmentAmount > 0,
+                        'opening_balance_amount' => $openingBalanceAmount,
+                        'commitment_amount' => $commitmentAmount,
                     ];
-                } catch (\Throwable $e) {
-                    $errors[] = [
-                        'row' => $rowNumber,
-                        'message' => $e->getMessage(),
-                    ];
-                }
+                });
+            } catch (\Throwable $e) {
+                $errors[] = [
+                    'row' => $rowNumber,
+                    'message' => $e->getMessage(),
+                ];
             }
-
-            DB::commit();
-
-            return [
-                'message' => 'Import completed.',
-                'summary' => [
-                    'total_rows' => count($rows),
-                    'created_count' => count($created),
-                    'skipped_count' => count($skipped),
-                    'error_count' => count($errors),
-                ],
-                'created' => $created,
-                'skipped' => $skipped,
-                'errors' => $errors,
-            ];
-        } catch (\Throwable $e) {
-            DB::rollBack();
-            throw $e;
         }
+
+        return [
+            'message' => 'Import completed.',
+            'summary' => [
+                'total_rows' => count($rows),
+                'created_count' => count($created),
+                'skipped_count' => count($skipped),
+                'error_count' => count($errors),
+            ],
+            'created' => $created,
+            'skipped' => $skipped,
+            'errors' => $errors,
+        ];
+    }
+
+    protected function resolveActiveFinancialYear(): object
+    {
+        $fy = FinancialYearRule::query()
+            ->where('is_active', true)
+            ->first();
+
+        if (!$fy) {
+            throw new InvalidArgumentException('No active financial year found.');
+        }
+
+        $start = Carbon::parse($fy->start_date)->startOfMonth();
+        $end = Carbon::parse($fy->end_date)->startOfMonth();
+
+        return (object) [
+            'id' => $fy->id,
+            'year_key' => $fy->year_key,
+            'start_period' => $start->format('Y-m'),
+            'end_period' => $end->format('Y-m'),
+            'cycle_months' => $start->diffInMonths($end) + 1,
+        ];
     }
 }

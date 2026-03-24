@@ -32,6 +32,9 @@ return new class extends Migration
                 'investment',
                 'investment_sale',
                 'registration_fee',
+                'donation',
+                'fine',
+                'other',
                 
             ]);
             $table->decimal('debit', 10, 2)->default(0);
