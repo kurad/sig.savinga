@@ -83,7 +83,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/members/{user}', [MemberController::class, 'show']);
         Route::patch('/members/{user}', [MemberController::class, 'update']);
         Route::patch('/members/{user}/toggle-active', [MemberController::class, 'toggleStatus']);
-
+        Route::post('/members/import', [MemberController::class, 'importFromExcel']);
 
         Route::post('/beneficiaries', [BeneficiaryController::class, 'store']);
         Route::patch('beneficiaries/{beneficiary}/set-active', [BeneficiaryController::class, 'setActive']);
