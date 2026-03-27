@@ -14,6 +14,8 @@ class DashboardController extends Controller
 {
     public function index(Request $request)
     {
+        $user = $request->user();
+
         $from = $request->query('from');
         $to   = $request->query('to');
 
@@ -21,10 +23,16 @@ class DashboardController extends Controller
         $toDt   = $to ? Carbon::parse($to)->endOfDay() : null;
 
         $applyRange = function ($q, string $col = 'created_at') use ($fromDt, $toDt) {
-            if ($fromDt) $q->where($col, '>=', $fromDt);
-            if ($toDt)   $q->where($col, '<=', $toDt);
+            if ($fromDt) {
+                $q->where($col, '>=', $fromDt);
+            }
+            if ($toDt) {
+                $q->where($col, '<=', $toDt);
+            }
             return $q;
         };
+
+        $isPrivileged = in_array($user->role, ['admin', 'treasurer'], true);
 
         // ============================
         // Period ledger totals (NET)
@@ -32,7 +40,10 @@ class DashboardController extends Controller
         $periodTxQ = Transaction::query();
         $applyRange($periodTxQ, 'created_at');
 
-        // Map your reversal types here (adjust names to match your system)
+        if (!$isPrivileged) {
+            $periodTxQ->where('user_id', $user->id);
+        }
+
         $periodAgg = $periodTxQ->selectRaw("
             COALESCE(SUM(CASE WHEN type = 'contribution' THEN credit ELSE 0 END), 0) AS contrib_in,
             COALESCE(SUM(CASE WHEN type IN ('contribution_reversal','contribution_undo') THEN debit ELSE 0 END), 0) AS contrib_rev,
@@ -54,73 +65,121 @@ class DashboardController extends Controller
         $repayNet   = (float) $periodAgg->repay_in   - (float) $periodAgg->repay_rev;
         $profitNet  = (float) $periodAgg->profit_in  - (float) $periodAgg->profit_rev;
         $penaltyNet = (float) $periodAgg->penalty_in - (float) $periodAgg->penalty_rev;
+        $loanOutNet = (float) $periodAgg->loan_out   - (float) $periodAgg->loan_out_rev;
 
-        // Loan disbursed "out" net: original debits minus reversal credits
-        $loanOutNet = (float) $periodAgg->loan_out - (float) $periodAgg->loan_out_rev;
-
+        // ============================
         // Expenses (period filtered)
-        $expQ = Expense::query();
-        $applyRange($expQ, 'expense_date'); // change if your column differs
-        $expensesTotal = (float) $expQ->sum('amount');
+        // ============================
+        // Usually only admins/treasurers should see group expenses.
+        $expensesTotal = 0.0;
+        if ($isPrivileged) {
+            $expQ = Expense::query();
+            $applyRange($expQ, 'expense_date');
+            $expensesTotal = (float) $expQ->sum('amount');
+        }
 
         // ============================
         // Cash balance (current, full history)
         // ============================
-        // WARNING: This assumes expenses are NOT recorded in transactions.
-        $cashAgg = Transaction::query()
-            ->selectRaw("
-                COALESCE(SUM(credit), 0) AS total_credit,
-                COALESCE(SUM(debit), 0) AS total_debit
-            ")
-            ->first();
+        // For normal members, this should probably not be the group cash balance.
+        $cashBalance = 0.0;
 
-        $allExpenses = (float) Expense::query()->sum('amount');
+        if ($isPrivileged) {
+            $cashAgg = Transaction::query()
+                ->selectRaw("
+                    COALESCE(SUM(credit), 0) AS total_credit,
+                    COALESCE(SUM(debit), 0) AS total_debit
+                ")
+                ->first();
 
-        $cashBalance = (float) $cashAgg->total_credit - (float) $cashAgg->total_debit - $allExpenses;
+            $allExpenses = (float) Expense::query()->sum('amount');
+
+            $cashBalance = (float) $cashAgg->total_credit - (float) $cashAgg->total_debit - $allExpenses;
+        } else {
+            $memberCashAgg = Transaction::query()
+                ->where('user_id', $user->id)
+                ->selectRaw("
+                    COALESCE(SUM(credit), 0) AS total_credit,
+                    COALESCE(SUM(debit), 0) AS total_debit
+                ")
+                ->first();
+
+            $cashBalance = (float) $memberCashAgg->total_credit - (float) $memberCashAgg->total_debit;
+        }
 
         // ============================
         // Loans outstanding (current)
         // ============================
-        $activeLoans = Loan::where('status', 'active')->get();
+        $activeLoansQ = Loan::where('status', 'active');
+
+        if (!$isPrivileged) {
+            $activeLoansQ->where('user_id', $user->id);
+        }
+
+        $activeLoans = $activeLoansQ->get();
         $outstandingTotal = (float) $activeLoans->sum(fn ($l) => $l->outstandingBalance());
 
-        $overdueLoansCount = (int) Loan::where('status', 'active')
-            ->whereDate('due_date', '<', now()->toDateString())
-            ->count();
+        $overdueLoansCountQ = Loan::where('status', 'active')
+            ->whereDate('due_date', '<', now()->toDateString());
+
+        if (!$isPrivileged) {
+            $overdueLoansCountQ->where('user_id', $user->id);
+        }
+
+        $overdueLoansCount = (int) $overdueLoansCountQ->count();
 
         // ============================
         // Penalties (current)
         // ============================
-        $unpaidPenalties = (int) Penalty::where('status', 'unpaid')->count();
-        $unpaidPenaltyAmount = (float) Penalty::where('status', 'unpaid')->sum('amount');
+        $penaltyQ = Penalty::where('status', 'unpaid');
+
+        if (!$isPrivileged) {
+            $penaltyQ->where('user_id', $user->id);
+        }
+
+        $unpaidPenalties = (int) (clone $penaltyQ)->count();
+        $unpaidPenaltyAmount = (float) (clone $penaltyQ)->sum('amount');
 
         // ============================
         // Profit cycle (current)
         // ============================
-        $openCycle = ProfitCycle::where('status', 'open')->latest()->first();
+        // Usually group-wide; hide from normal members if needed.
+        $openCycle = $isPrivileged
+            ? ProfitCycle::where('status', 'open')->latest()->first()
+            : null;
+
         $openCycleId = $openCycle?->id;
 
         // ============================
         // Recent transactions (current)
         // ============================
-        $recent = Transaction::query()
+        $recentQ = Transaction::query();
+
+        if (!$isPrivileged) {
+            $recentQ->where('user_id', $user->id);
+        }
+
+        $recent = $recentQ
             ->latest()
             ->limit(10)
-            ->get(['id','type','debit','credit','reference','created_at']);
+            ->get(['id', 'user_id', 'type', 'debit', 'credit', 'reference', 'created_at']);
 
         return response()->json([
-            'filters' => ['from' => $from, 'to' => $to],
+            'filters' => [
+                'from' => $from,
+                'to' => $to,
+            ],
 
             'kpis' => [
                 'cash_balance' => round($cashBalance, 2),
 
                 'period' => [
-                    'contributions_in'     => round($contribNet, 2),
-                    'loan_repayments_in'   => round($repayNet, 2),
-                    'profit_in'            => round($profitNet, 2),
-                    'penalties_in'         => round($penaltyNet, 2),
-                    'loan_disbursed_out'   => round($loanOutNet, 2),
-                    'expenses_out'         => round($expensesTotal, 2),
+                    'contributions_in'   => round($contribNet, 2),
+                    'loan_repayments_in' => round($repayNet, 2),
+                    'profit_in'          => round($profitNet, 2),
+                    'penalties_in'       => round($penaltyNet, 2),
+                    'loan_disbursed_out' => round($loanOutNet, 2),
+                    'expenses_out'       => round($expensesTotal, 2),
                 ],
 
                 'loans' => [
