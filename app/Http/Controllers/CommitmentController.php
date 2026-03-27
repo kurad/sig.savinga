@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Models\Beneficiary;
 use App\Models\ContributionCommitment;
 use App\Models\SystemRule;
 use App\Services\CommitmentService;
@@ -23,6 +24,35 @@ class CommitmentController extends Controller
             'beneficiary.guardian:id,name,email,phone',
         ];
     }
+
+    /**
+     * Resolve owner user_id.
+     * - If user_id is provided, use it.
+     * - If beneficiary_id is provided and user_id is missing, derive user_id from guardian_user_id.
+     */
+    protected function resolveOwnerUserId(?int $userId, ?int $beneficiaryId): int
+    {
+        if (!empty($userId)) {
+            return (int) $userId;
+        }
+
+        if (!empty($beneficiaryId)) {
+            $beneficiary = Beneficiary::findOrFail($beneficiaryId);
+
+            if (empty($beneficiary->guardian_user_id)) {
+                throw ValidationException::withMessages([
+                    'beneficiary_id' => ['Selected beneficiary has no guardian user linked.'],
+                ]);
+            }
+
+            return (int) $beneficiary->guardian_user_id;
+        }
+
+        throw ValidationException::withMessages([
+            'participant' => ['Either user_id or beneficiary_id is required.'],
+        ]);
+    }
+
     public function index(Request $request)
     {
         $data = $request->validate([
@@ -43,8 +73,12 @@ class CommitmentController extends Controller
             $query->where('user_id', (int) $data['user_id']);
         }
 
-        if (!empty($data['beneficiary_id'])) {
-            $query->where('beneficiary_id', (int) $data['beneficiary_id']);
+        if (array_key_exists('beneficiary_id', $data)) {
+            if (!empty($data['beneficiary_id'])) {
+                $query->where('beneficiary_id', (int) $data['beneficiary_id']);
+            } else {
+                $query->whereNull('beneficiary_id');
+            }
         }
 
         if (!empty($data['status'])) {
@@ -53,16 +87,22 @@ class CommitmentController extends Controller
 
         return response()->json($query->paginate($perPage));
     }
+
     public function active(Request $request)
     {
         $data = $request->validate([
-            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'period' => ['required', 'date_format:Y-m'],
         ]);
 
+        $userId = $this->resolveOwnerUserId(
+            $data['user_id'] ?? null,
+            $data['beneficiary_id'] ?? null
+        );
+
         $commitment = $this->commitmentService->activeForPeriod(
-            userId: (int) $data['user_id'],
+            userId: $userId,
             beneficiaryId: $data['beneficiary_id'] ?? null,
             periodKey: $data['period']
         );
@@ -71,14 +111,20 @@ class CommitmentController extends Controller
             'data' => $commitment?->load($this->commitmentRelations()),
         ]);
     }
+
     public function store(Request $request)
     {
         $data = $request->validate([
-            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'start_period' => ['required', 'date_format:Y-m'],
+            'cycle_start_period' => ['required', 'date_format:Y-m'],
         ]);
+
+        $userId = $this->resolveOwnerUserId(
+            $data['user_id'] ?? null,
+            $data['beneficiary_id'] ?? null
+        );
 
         $rules = SystemRule::firstOrFail();
 
@@ -90,22 +136,22 @@ class CommitmentController extends Controller
         }
 
         $cycleMonths = (int) ($rules->contribution_cycle_months ?? 12);
-        $anchor = (string) ($rules->cycle_anchor_period ?? $data['start_period']);
+        $anchor = (string) ($rules->cycle_anchor_period ?? $data['cycle_start_period']);
 
         [$cycleStart, $cycleEnd] = $this->commitmentService->cycleWindow(
-            period: $data['start_period'],
+            period: $data['cycle_start_period'],
             anchor: $anchor,
             cycleMonths: $cycleMonths
         );
 
-        if ($data['start_period'] !== $cycleStart) {
+        if ($data['cycle_start_period'] !== $cycleStart) {
             throw ValidationException::withMessages([
-                'start_period' => ["Commitment can only start at cycle start ({$cycleStart})."],
+                'cycle_start_period' => ["Commitment can only start at cycle start ({$cycleStart})."],
             ]);
         }
 
         $commitment = $this->commitmentService->setForCycle(
-            userId: (int) $data['user_id'],
+            userId: $userId,
             beneficiaryId: $data['beneficiary_id'] ?? null,
             amount: (float) $data['amount'],
             cycleStart: $cycleStart,
@@ -119,6 +165,7 @@ class CommitmentController extends Controller
             'data' => $commitment->load($this->commitmentRelations()),
         ], 201);
     }
+
     public function expire(ContributionCommitment $commitment)
     {
         if ($commitment->status === 'expired') {
@@ -141,16 +188,21 @@ class CommitmentController extends Controller
     public function showByParticipant(Request $request)
     {
         $data = $request->validate([
-            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'period' => ['nullable', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
         ]);
 
+        $userId = $this->resolveOwnerUserId(
+            $data['user_id'] ?? null,
+            $data['beneficiary_id'] ?? null
+        );
+
         $q = ContributionCommitment::query()
             ->with($this->commitmentRelations())
-            ->where('user_id', (int) $data['user_id']);
+            ->where('user_id', $userId);
 
-        if (array_key_exists('beneficiary_id', $data) && $data['beneficiary_id']) {
+        if (!empty($data['beneficiary_id'])) {
             $q->where('beneficiary_id', (int) $data['beneficiary_id']);
         } else {
             $q->whereNull('beneficiary_id');
@@ -158,7 +210,7 @@ class CommitmentController extends Controller
 
         if (!empty($data['period'])) {
             $q->where('cycle_start_period', '<=', $data['period'])
-                ->where('cycle_end_period', '>=', $data['period']);
+              ->where('cycle_end_period', '>=', $data['period']);
         }
 
         $item = $q->orderByDesc('cycle_start_period')
@@ -175,10 +227,11 @@ class CommitmentController extends Controller
             'data' => $item,
         ]);
     }
+
     public function update(Request $request, ContributionCommitment $commitment)
     {
         $data = $request->validate([
-            'user_id' => ['required', 'integer', 'exists:users,id'],
+            'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'amount' => ['required', 'numeric', 'min:0.01'],
             'cycle_start_period' => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
@@ -187,6 +240,11 @@ class CommitmentController extends Controller
             'status' => ['required', 'in:active,expired'],
             'activated_at' => ['nullable', 'date'],
         ]);
+
+        $userId = $this->resolveOwnerUserId(
+            $data['user_id'] ?? null,
+            $data['beneficiary_id'] ?? null
+        );
 
         if ($data['cycle_end_period'] < $data['cycle_start_period']) {
             throw ValidationException::withMessages([
@@ -205,7 +263,7 @@ class CommitmentController extends Controller
 
         $updated = $this->commitmentService->updateCommitment(
             commitment: $commitment,
-            userId: (int) $data['user_id'],
+            userId: $userId,
             beneficiaryId: $data['beneficiary_id'] ?? null,
             amount: (float) $data['amount'],
             cycleStart: $data['cycle_start_period'],
