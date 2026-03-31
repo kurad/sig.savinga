@@ -49,20 +49,25 @@ class CommitmentService
         $this->assertPeriodKey($periodKey);
 
         $query = ContributionCommitment::query()
-            ->where('user_id', $userId)
             ->where('status', 'active')
             ->where('cycle_start_period', '<=', $periodKey)
-            ->where('cycle_end_period', '>=', $periodKey)
-            ->orderByDesc('activated_at')
-            ->orderByDesc('id');
+            ->where(function ($q) use ($periodKey) {
+                $q->whereNull('cycle_end_period')
+                    ->orWhere('cycle_end_period', '>=', $periodKey);
+            });
 
-        if (is_null($beneficiaryId)) {
-            $query->whereNull('beneficiary_id');
+        if ($beneficiaryId !== null) {
+            $query->where('user_id', $userId)
+                ->where('beneficiary_id', $beneficiaryId);
         } else {
-            $query->where('beneficiary_id', $beneficiaryId);
+            $query->where('user_id', $userId)
+                ->whereNull('beneficiary_id');
         }
 
-        return $query->first();
+        return $query
+            ->orderByDesc('activated_at')
+            ->orderByDesc('id')
+            ->first();
     }
     public function setForCycle(
         int $userId,
