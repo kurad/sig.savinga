@@ -58,6 +58,7 @@ class CommitmentController extends Controller
         $data = $request->validate([
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
+            'participant_type' => ['nullable', 'in:user,beneficiary'],
             'status' => ['nullable', 'in:active,expired'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
         ]);
@@ -73,9 +74,13 @@ class CommitmentController extends Controller
             $query->where('user_id', (int) $data['user_id']);
         }
 
-        if (array_key_exists('beneficiary_id', $data)) {
-            if (!empty($data['beneficiary_id'])) {
-                $query->where('beneficiary_id', (int) $data['beneficiary_id']);
+        if (!empty($data['beneficiary_id'])) {
+            $query->where('beneficiary_id', (int) $data['beneficiary_id']);
+        }
+
+        if (!empty($data['participant_type'])) {
+            if ($data['participant_type'] === 'beneficiary') {
+                $query->whereNotNull('beneficiary_id');
             } else {
                 $query->whereNull('beneficiary_id');
             }
@@ -95,6 +100,23 @@ class CommitmentController extends Controller
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'period' => ['required', 'date_format:Y-m'],
         ]);
+
+        if (empty($data['user_id']) && empty($data['beneficiary_id'])) {
+            throw ValidationException::withMessages([
+                'participant' => ['Either user_id or beneficiary_id is required.'],
+            ]);
+        }
+
+        if (!empty($data['user_id']) && !empty($data['beneficiary_id'])) {
+            // optional: only allow this if you intentionally support it
+            $beneficiary = Beneficiary::findOrFail((int) $data['beneficiary_id']);
+
+            if ((int) $beneficiary->guardian_user_id !== (int) $data['user_id']) {
+                throw ValidationException::withMessages([
+                    'beneficiary_id' => ['Selected beneficiary does not belong to the provided user_id.'],
+                ]);
+            }
+        }
 
         $userId = $this->resolveOwnerUserId(
             $data['user_id'] ?? null,
@@ -210,7 +232,7 @@ class CommitmentController extends Controller
 
         if (!empty($data['period'])) {
             $q->where('cycle_start_period', '<=', $data['period'])
-              ->where('cycle_end_period', '>=', $data['period']);
+                ->where('cycle_end_period', '>=', $data['period']);
         }
 
         $item = $q->orderByDesc('cycle_start_period')
@@ -234,11 +256,7 @@ class CommitmentController extends Controller
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'amount' => ['required', 'numeric', 'min:0.01'],
-            'cycle_start_period' => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
-            'cycle_end_period' => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
-            'cycle_months' => ['required', 'integer', 'min:1'],
-            'status' => ['required', 'in:active,expired'],
-            'activated_at' => ['nullable', 'date'],
+            'cycle_start_period' => ['nullable', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
         ]);
 
         $userId = $this->resolveOwnerUserId(
@@ -246,13 +264,7 @@ class CommitmentController extends Controller
             $data['beneficiary_id'] ?? null
         );
 
-        if ($data['cycle_end_period'] < $data['cycle_start_period']) {
-            throw ValidationException::withMessages([
-                'cycle_end_period' => ['cycle_end_period cannot be before cycle_start_period.'],
-            ]);
-        }
-
-        $rules = SystemRule::first();
+        $rules = SystemRule::firstOrFail();
         $min = (float) ($rules->contribution_min_amount ?? 0);
 
         if ((float) $data['amount'] < $min) {
@@ -261,21 +273,18 @@ class CommitmentController extends Controller
             ]);
         }
 
-        $updated = $this->commitmentService->updateCommitment(
+        $updated = $this->commitmentService->updateAmountOrStartNewCycle(
             commitment: $commitment,
             userId: $userId,
             beneficiaryId: $data['beneficiary_id'] ?? null,
             amount: (float) $data['amount'],
-            cycleStart: $data['cycle_start_period'],
-            cycleEnd: $data['cycle_end_period'],
-            cycleMonths: (int) $data['cycle_months'],
-            status: $data['status'],
-            activatedAt: $data['activated_at'] ?? null
+            requestedStartPeriod: $data['cycle_start_period'] ?? null,
+            createdBy: (int) $request->user()->id
         );
 
         return response()->json([
-            'message' => 'Commitment updated successfully.',
-            'data' => $updated->load($this->commitmentRelations()),
+            'message' => $updated['message'],
+            'data' => $updated['data']->load($this->commitmentRelations()),
         ]);
     }
 }

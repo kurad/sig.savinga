@@ -4,8 +4,11 @@ namespace App\Services;
 
 use App\Models\ContributionCommitment;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
+use App\Models\Contribution;
+use App\Models\SystemRule;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class CommitmentService
 {
@@ -334,5 +337,148 @@ class CommitmentService
         if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $periodKey)) {
             throw new InvalidArgumentException("Period key must be YYYY-MM, got: {$periodKey}");
         }
+    }
+    public function updateAmountOrStartNewCycle(
+        ContributionCommitment $commitment,
+        int $userId,
+        ?int $beneficiaryId,
+        float $amount,
+        ?string $requestedStartPeriod,
+        int $createdBy
+    ): array {
+        return DB::transaction(function () use (
+            $commitment,
+            $userId,
+            $beneficiaryId,
+            $amount,
+            $requestedStartPeriod,
+            $createdBy
+        ) {
+            $this->validateOwner($userId, $beneficiaryId);
+
+            if ($amount <= 0) {
+                throw ValidationException::withMessages([
+                    'amount' => ['Amount must be greater than 0.'],
+                ]);
+            }
+
+            $sameOwner =
+                (int) $commitment->user_id === (int) $userId &&
+                ((int) ($commitment->beneficiary_id ?? 0) === (int) ($beneficiaryId ?? 0));
+
+            if (!$sameOwner) {
+                throw ValidationException::withMessages([
+                    'participant' => ['This commitment does not belong to the selected participant.'],
+                ]);
+            }
+
+            $hasRecordedContributions = Contribution::query()
+                ->where('user_id', $userId)
+                ->when(
+                    $beneficiaryId !== null,
+                    fn($q) => $q->where('beneficiary_id', $beneficiaryId),
+                    fn($q) => $q->whereNull('beneficiary_id')
+                )
+                ->where('period_key', '>=', $commitment->cycle_start_period)
+                ->where('period_key', '<=', $commitment->cycle_end_period)
+                ->exists();
+
+            // Case 1: no contributions yet -> just update amount
+            if (!$hasRecordedContributions) {
+                $commitment->update([
+                    'amount' => $amount,
+                ]);
+
+                return [
+                    'message' => 'Commitment amount updated successfully.',
+                    'data' => $commitment->fresh(),
+                ];
+            }
+
+            // Case 2: contributions already recorded -> create a new cycle
+            if (!$requestedStartPeriod) {
+                throw ValidationException::withMessages([
+                    'cycle_start_period' => [
+                        'A new cycle start period is required because contributions have already been recorded for the current cycle.',
+                    ],
+                ]);
+            }
+
+            $this->assertPeriodKey($requestedStartPeriod);
+
+            $rules = SystemRule::firstOrFail();
+            $cycleMonths = (int) ($rules->contribution_cycle_months ?? 12);
+            $anchor = (string) ($rules->cycle_anchor_period ?? $requestedStartPeriod);
+
+            [$cycleStart, $cycleEnd] = $this->cycleWindow(
+                period: $requestedStartPeriod,
+                anchor: $anchor,
+                cycleMonths: $cycleMonths
+            );
+
+            if ($requestedStartPeriod !== $cycleStart) {
+                throw ValidationException::withMessages([
+                    'cycle_start_period' => [
+                        "New commitment can only start at cycle start ({$cycleStart}).",
+                    ],
+                ]);
+            }
+
+            if ($cycleStart <= $commitment->cycle_start_period) {
+                throw ValidationException::withMessages([
+                    'cycle_start_period' => [
+                        'New cycle must start after the current commitment cycle start period.',
+                    ],
+                ]);
+            }
+
+            $overlap = ContributionCommitment::query()
+                ->where('user_id', $userId)
+                ->when(
+                    $beneficiaryId !== null,
+                    fn($q) => $q->where('beneficiary_id', $beneficiaryId),
+                    fn($q) => $q->whereNull('beneficiary_id')
+                )
+                ->where('status', 'active')
+                ->where('id', '!=', $commitment->id)
+                ->where(function ($q) use ($cycleStart, $cycleEnd) {
+                    $q->whereBetween('cycle_start_period', [$cycleStart, $cycleEnd])
+                        ->orWhereBetween('cycle_end_period', [$cycleStart, $cycleEnd])
+                        ->orWhere(function ($sub) use ($cycleStart, $cycleEnd) {
+                            $sub->where('cycle_start_period', '<=', $cycleStart)
+                                ->where('cycle_end_period', '>=', $cycleEnd);
+                        });
+                })
+                ->exists();
+
+            if ($overlap) {
+                throw ValidationException::withMessages([
+                    'cycle_start_period' => ['There is already an active commitment overlapping this new cycle.'],
+                ]);
+            }
+
+            // expire current one
+            $commitment->update([
+                'status' => 'expired',
+            ]);
+
+            // create the new one
+            $newCommitment = ContributionCommitment::create([
+                'user_id' => $userId,
+                'beneficiary_id' => $beneficiaryId,
+                'amount' => $amount,
+                'cycle_start_period' => $cycleStart,
+                'cycle_end_period' => $cycleEnd,
+                'cycle_months' => $cycleMonths,
+                'status' => 'active',
+                'activated_at' => now(),
+                'created_by' => $createdBy,
+            ]);
+
+            return [
+                'message' => 'Current commitment already has recorded contributions. A new cycle commitment has been created instead.',
+                'data' => $newCommitment,
+            ];
+        });
     }
 }

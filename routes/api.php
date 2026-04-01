@@ -164,6 +164,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::post('/opening-balances', [OpeningBalanceController::class, 'store']);
         Route::get('/opening-balances/user/{userId}', [OpeningBalanceController::class, 'showByUser']);
+        Route::get('/opening-balances/beneficiary/{beneficiaryId}', [OpeningBalanceController::class, 'showByBeneficiary']);
 
 
         // Financial year rules (admin settings)
