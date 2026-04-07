@@ -32,6 +32,7 @@ class Loan extends Model
         'rate_set_by',
         'rate_set_at',
         'rate_notes',
+        'is_migrated',
     ];
 
     protected $casts = [
@@ -132,7 +133,7 @@ class Loan extends Model
     {
         return $query->where(function ($q) {
             $q->whereNull('repayment_mode')
-              ->orWhere('repayment_mode', 'once');
+                ->orWhere('repayment_mode', 'once');
         });
     }
 
@@ -225,5 +226,33 @@ class Loan extends Model
     public function isTopUp(): bool
     {
         return !is_null($this->base_loan_id);
+    }
+    public function migrationSnapshot()
+    {
+        return $this->hasOne(LoanMigrationSnapshot::class);
+    }
+    public function getMigratedOutstandingBalanceAttribute(): float
+    {
+        $snapshot = $this->migrationSnapshot;
+
+        if (!$snapshot) {
+            return (float) $this->total_payable;
+        }
+
+        $paidAfterMigration = (float) $this->repayments()->sum('amount');
+
+        return max(
+            0,
+            ((float) $snapshot->outstanding_principal + (float) $snapshot->outstanding_interest) - $paidAfterMigration
+        );
+    }
+    public function adjustments()
+    {
+        return $this->morphMany(\App\Models\Adjustment::class, 'adjustable');
+    }
+
+    public function effectivePrincipal(): float
+    {
+        return round((float) $this->principal + (float) $this->adjustments()->sum('amount'), 2);
     }
 }

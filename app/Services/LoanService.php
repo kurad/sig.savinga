@@ -106,10 +106,10 @@ class LoanService
                 'beneficiary.guardian:id,name,email,phone',
                 'baseLoan:id',
             ])
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($userId) && is_null($beneficiaryId), fn ($q) => $q->whereNull('beneficiary_id'))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId))
-            ->when($status, fn ($q) => $q->where('status', $status))
+            ->when(!is_null($userId), fn($q) => $q->where('user_id', $userId))
+            ->when(!is_null($userId) && is_null($beneficiaryId), fn($q) => $q->whereNull('beneficiary_id'))
+            ->when(!is_null($beneficiaryId), fn($q) => $q->where('beneficiary_id', $beneficiaryId))
+            ->when($status, fn($q) => $q->where('status', $status))
             ->orderByDesc('created_at');
 
         $p = $query->paginate($perPage);
@@ -117,6 +117,7 @@ class LoanService
         $p->getCollection()->transform(function (Loan $loan) {
             $mode = (string) ($loan->repayment_mode ?? 'once');
 
+            $loan->is_migrated = (bool) $loan->is_migrated;
             $principal      = round((float) $loan->principal, 2);
             $interestAmount = round((float) ($loan->interest_amount ?? 0), 2);
             $totalPayable   = round((float) $loan->total_payable, 2);
@@ -518,6 +519,7 @@ class LoanService
                     'loan' => [
                         'id' => $loan->id,
                         'status' => $loan->status,
+                        'is_migrated' => $loan->is_migrated,
                         'outstanding_balance' => round((float) $loan->outstandingBalance(), 2),
                         'outstanding_principal' => round((float) $loan->outstandingPrincipal(), 2),
                         'outstanding_interest' => round((float) $loan->outstandingInterest(), 2),
@@ -556,7 +558,7 @@ class LoanService
                 );
 
                 $extraAllocationsTotal = round(
-                    collect($extraContribution['allocations'] ?? [])->sum(fn ($a) => (float) ($a['allocated'] ?? 0)),
+                    collect($extraContribution['allocations'] ?? [])->sum(fn($a) => (float) ($a['allocated'] ?? 0)),
                     2
                 );
             }
@@ -613,7 +615,9 @@ class LoanService
             }
         }
 
-        if ($mode === 'installment') {
+        if ($loan->is_migrated) {
+            [$interestComponent, $principalComponent] = $this->allocateRepaymentInterestFirst($loan, $amount);
+        } elseif ($mode === 'installment') {
             $totalPayable = round((float) $loan->total_payable, 2);
             $totalInterest = round((float) ($loan->interest_amount ?? 0), 2);
 
@@ -702,12 +706,12 @@ class LoanService
         $repayments = $loanIds->isEmpty()
             ? collect()
             : LoanRepayment::whereIn('loan_id', $loanIds)
-                ->when($fromDt, fn ($q) => $q->where('created_at', '>=', $fromDt))
-                ->when($toDt, fn ($q) => $q->where('created_at', '<=', $toDt))
-                ->get(['loan_id', 'amount', 'principal_component', 'interest_component', 'created_at']);
+            ->when($fromDt, fn($q) => $q->where('created_at', '>=', $fromDt))
+            ->when($toDt, fn($q) => $q->where('created_at', '<=', $toDt))
+            ->get(['loan_id', 'amount', 'principal_component', 'interest_component', 'created_at']);
 
         $totalBorrowedPrincipal = (float) $loans->sum('principal');
-        $totalInterestCharged = (float) $loans->sum(fn ($l) => (float) $l->total_payable - (float) $l->principal);
+        $totalInterestCharged = (float) $loans->sum(fn($l) => (float) $l->total_payable - (float) $l->principal);
 
         $totalRepaidAmount = (float) $repayments->sum('amount');
         $principalRepaid = (float) $repayments->sum('principal_component');
@@ -715,9 +719,9 @@ class LoanService
 
         $allLoansNow = Loan::where('user_id', $member->id)->whereNull('beneficiary_id')->get();
 
-        $outstandingTotal = (float) $allLoansNow->sum(fn ($l) => (float) $l->outstandingBalance());
-        $outstandingPrincipal = (float) $allLoansNow->sum(fn ($l) => (float) $l->outstandingPrincipal());
-        $outstandingInterest = (float) $allLoansNow->sum(fn ($l) => (float) $l->outstandingInterest());
+        $outstandingTotal = (float) $allLoansNow->sum(fn($l) => (float) $l->outstandingBalance());
+        $outstandingPrincipal = (float) $allLoansNow->sum(fn($l) => (float) $l->outstandingPrincipal());
+        $outstandingInterest = (float) $allLoansNow->sum(fn($l) => (float) $l->outstandingInterest());
 
         $activeCount = (int) $allLoansNow->where('status', 'active')->count();
         $completedCount = (int) $allLoansNow->where('status', 'completed')->count();
@@ -731,8 +735,8 @@ class LoanService
         })->count();
 
         $nextDue = $activeLoans
-            ->filter(fn ($l) => !empty($l->due_date))
-            ->sortBy(fn ($l) => Carbon::parse($l->due_date)->timestamp)
+            ->filter(fn($l) => !empty($l->due_date))
+            ->sortBy(fn($l) => Carbon::parse($l->due_date)->timestamp)
             ->first();
 
         return [
@@ -792,7 +796,7 @@ class LoanService
             ->where('status', 'active')
             ->get();
 
-        $exposureNow = (float) $activeLoans->sum(fn ($l) => (float) $l->outstandingBalance());
+        $exposureNow = (float) $activeLoans->sum(fn($l) => (float) $l->outstandingBalance());
         $headroom = max(0, (float) $maxAllowed - (float) $exposureNow);
 
         $enabled = (bool) ($rules->allow_loan_top_up ?? false);
@@ -1072,7 +1076,7 @@ class LoanService
                 ->lockForUpdate()
                 ->get();
 
-            $exposureNow = round((float) $activeLoans->sum(fn ($l) => (float) $l->outstandingBalance()), 2);
+            $exposureNow = round((float) $activeLoans->sum(fn($l) => (float) $l->outstandingBalance()), 2);
 
             $exposureAfterClose = round(max(0, $exposureNow - $baseOutstanding), 2);
             $headroomAfterClose = round(max(0, $maxAllowed - $exposureAfterClose), 2);
@@ -1080,8 +1084,8 @@ class LoanService
             if ($newPrincipalTotal > $headroomAfterClose + 0.0001) {
                 throw new \Exception(
                     'Requested amount exceeds allowed limit. Max possible new total is '
-                    . number_format($headroomAfterClose, 2)
-                    . ' based on savings base and active exposure after closing the base loan.'
+                        . number_format($headroomAfterClose, 2)
+                        . ' based on savings base and active exposure after closing the base loan.'
                 );
             }
 
@@ -1216,7 +1220,7 @@ class LoanService
         $topUps = $base->topUps()
             ->orderBy('created_at')
             ->get()
-            ->map(fn (Loan $l) => [
+            ->map(fn(Loan $l) => [
                 'id' => $l->id,
                 'user_id' => $l->user_id,
                 'beneficiary_id' => $l->beneficiary_id,
@@ -1278,7 +1282,7 @@ class LoanService
             ->where('status', 'active')
             ->get();
 
-        $exposureNow = round((float) $activeLoans->sum(fn ($l) => (float) $l->outstandingBalance()), 2);
+        $exposureNow = round((float) $activeLoans->sum(fn($l) => (float) $l->outstandingBalance()), 2);
 
         $exposureAfterClose = round(max(0, $exposureNow - $baseOutstanding), 2);
         $headroomNewTotal = round(max(0, $maxAllowed - $exposureAfterClose), 2);
@@ -1517,7 +1521,7 @@ class LoanService
             ->get();
 
         $hasActive = $activeLoans->isNotEmpty();
-        $exposureNow = round((float) $activeLoans->sum(fn ($l) => (float) $l->outstandingBalance()), 2);
+        $exposureNow = round((float) $activeLoans->sum(fn($l) => (float) $l->outstandingBalance()), 2);
 
         $minMonths = (int) ($rules->min_contribution_months ?? 0);
 
@@ -1567,11 +1571,11 @@ class LoanService
 
         $candidates = User::query()
             ->select(['id', 'name', 'email', 'phone'])
-            ->when($userId, fn ($q) => $q->where('id', '!=', $userId))
+            ->when($userId, fn($q) => $q->where('id', '!=', $userId))
             ->orderBy('name')
             ->limit(200)
             ->get()
-            ->map(fn ($u) => [
+            ->map(fn($u) => [
                 'id' => $u->id,
                 'name' => $u->name,
                 'phone' => $u->phone,
@@ -1706,6 +1710,7 @@ class LoanService
             'user:id,name,phone,email',
             'beneficiary:id,guardian_user_id,name,relationship',
             'beneficiary.guardian:id,name,phone,email',
+            'migrationSnapshot',
         ])->findOrFail($loanId);
 
         $principalOutstanding = round((float) $loan->outstandingPrincipal(), 2);
@@ -1778,10 +1783,25 @@ class LoanService
                 ...$ownerMeta,
                 'principal' => round((float) $loan->principal, 2),
                 'total_payable' => round((float) $loan->total_payable, 2),
+                'is_migrated' => (bool) $loan->is_migrated,
                 'repayment_mode' => (string) ($loan->repayment_mode ?? 'once'),
                 'loan_due_date' => $loan->due_date ? Carbon::parse($loan->due_date, $tz)->toDateString() : null,
                 'issued_date' => $loan->issued_date ? Carbon::parse($loan->issued_date, $tz)->toDateString() : null,
                 'financial_year_rule_id_used' => (int) $fy->id,
+
+                'migration_snapshot' => $loan->is_migrated && $loan->migrationSnapshot ? [
+                    'migration_date' => $loan->migrationSnapshot->migration_date
+                        ? Carbon::parse($loan->migrationSnapshot->migration_date, $tz)->toDateString()
+                        : null,
+                    'original_principal' => round((float) $loan->migrationSnapshot->original_principal, 2),
+                    'original_total_payable' => !is_null($loan->migrationSnapshot->original_total_payable)
+                        ? round((float) $loan->migrationSnapshot->original_total_payable, 2)
+                        : null,
+                    'principal_paid_before_migration' => round((float) $loan->migrationSnapshot->principal_paid_before_migration, 2),
+                    'interest_paid_before_migration' => round((float) $loan->migrationSnapshot->interest_paid_before_migration, 2),
+                    'opening_outstanding_principal' => round((float) $loan->migrationSnapshot->outstanding_principal, 2),
+                    'opening_outstanding_interest' => round((float) $loan->migrationSnapshot->outstanding_interest, 2),
+                ] : null,
             ],
             'outstanding' => [
                 'total' => $outstandingTotal,
@@ -1855,7 +1875,7 @@ class LoanService
             }
         }
 
-        $onceLoans = $loans->filter(fn ($l) => ($l->repayment_mode ?? 'once') === 'once');
+        $onceLoans = $loans->filter(fn($l) => ($l->repayment_mode ?? 'once') === 'once');
 
         foreach ($onceLoans as $loan) {
             if (empty($loan->due_date)) {
@@ -1903,8 +1923,8 @@ class LoanService
         $installments = LoanInstallment::query()
             ->whereHas('loan', function ($q) use ($userId, $beneficiaryId) {
                 $q->where('user_id', $userId)
-                    ->when(is_null($beneficiaryId), fn ($qq) => $qq->whereNull('beneficiary_id'))
-                    ->when(!is_null($beneficiaryId), fn ($qq) => $qq->where('beneficiary_id', $beneficiaryId))
+                    ->when(is_null($beneficiaryId), fn($qq) => $qq->whereNull('beneficiary_id'))
+                    ->when(!is_null($beneficiaryId), fn($qq) => $qq->where('beneficiary_id', $beneficiaryId))
                     ->where('status', 'active');
             })
             ->whereBetween('due_date', [$start->toDateString(), $end->toDateString()])
@@ -2070,4 +2090,142 @@ class LoanService
 
         return round(max(0, (float) $maxAllowed), 2);
     }
+    public function adjustLoan(
+    int $loanId,
+    float $amount,
+    string $reason,
+    int $recordedBy
+): Loan {
+    $amount = round((float) $amount, 2);
+    $reason = trim($reason);
+
+    if ($amount == 0.0) {
+        throw new InvalidArgumentException('Adjustment amount cannot be zero.');
+    }
+
+    if ($reason === '') {
+        throw new InvalidArgumentException('Adjustment reason is required.');
+    }
+
+    return DB::transaction(function () use ($loanId, $amount, $reason, $recordedBy) {
+        $tz = 'Africa/Kigali';
+
+        $loan = Loan::query()
+            ->with(['repayments', 'installments'])
+            ->lockForUpdate()
+            ->findOrFail($loanId);
+
+        if ($loan->status !== 'active') {
+            throw new InvalidArgumentException('Only active loans can be adjusted.');
+        }
+
+        $repaymentsCount = $loan->repayments->count();
+        if ($repaymentsCount > 0) {
+            throw new InvalidArgumentException(
+                'Loan cannot be adjusted after repayments have started. Use reversal/restructure flow.'
+            );
+        }
+
+        $beforePrincipal = round((float) $loan->principal, 2);
+        $afterPrincipal = round($beforePrincipal + $amount, 2);
+
+        if ($afterPrincipal <= 0) {
+            throw new InvalidArgumentException('Loan principal must remain greater than zero after adjustment.');
+        }
+
+        $mode = (string) ($loan->repayment_mode ?? 'once');
+        $duration = max(1, (int) ($loan->duration_months ?? 1));
+
+        $interestRate = round((float) ($loan->interest_rate ?? 0), 2);
+        $interestBasis = (string) ($loan->interest_basis ?? 'per_year');
+        $interestTermMonths = $loan->interest_term_months ? (int) $loan->interest_term_months : null;
+
+        $interestMonths = ($mode === 'installment') ? $duration : 1;
+
+        $newInterestAmount = round((float) $this->computeInterest(
+            principal: $afterPrincipal,
+            rate: $interestRate,
+            basis: $interestBasis,
+            durationMonths: $interestMonths,
+            termMonths: $interestTermMonths
+        ), 2);
+
+        $newTotalPayable = round($afterPrincipal + $newInterestAmount, 2);
+        $newNetDisbursed = round($afterPrincipal - $newInterestAmount, 2);
+
+        if ($newNetDisbursed < 0) {
+            throw new InvalidArgumentException('Interest is greater than principal after adjustment.');
+        }
+
+        $loan->principal = $afterPrincipal;
+        $loan->interest_amount = $newInterestAmount;
+        $loan->total_payable = $newTotalPayable;
+        $loan->approved_by = $loan->approved_by ?: $recordedBy;
+        $loan->rate_set_by = $recordedBy;
+        $loan->rate_set_at = now($tz);
+
+        if ($mode === 'installment') {
+            $remainingOutstanding = round($newTotalPayable - $newInterestAmount, 2);
+            $monthlyInstallment = round($remainingOutstanding / $duration, 2);
+            $loan->monthly_installment = $monthlyInstallment;
+        }
+
+        $loan->save();
+
+        if ($mode === 'installment') {
+            $installments = LoanInstallment::query()
+                ->where('loan_id', $loan->id)
+                ->orderBy('installment_no')
+                ->lockForUpdate()
+                ->get();
+
+            if ($installments->isNotEmpty()) {
+                $remainingOutstanding = round($newTotalPayable - $newInterestAmount, 2);
+                $baseAmt = round($remainingOutstanding / $duration, 2);
+                $sumFirst = round($baseAmt * ($duration - 1), 2);
+                $lastAmt = round($remainingOutstanding - $sumFirst, 2);
+
+                foreach ($installments as $inst) {
+                    $instNo = (int) $inst->installment_no;
+                    $inst->amount_due = ($instNo === $duration) ? $lastAmt : $baseAmt;
+                    $inst->save();
+                }
+            }
+        }
+
+        $tx = $this->ledger->record(
+            type: 'loan_adjustment',
+            debit: $amount > 0 ? $amount : 0,
+            credit: $amount < 0 ? abs($amount) : 0,
+            userId: (int) $loan->user_id,
+            reference: "Loan adjustment for Loan ID {$loan->id} — {$reason}",
+            createdBy: $recordedBy,
+            sourceType: 'loan_adjustment',
+            sourceId: (int) $loan->id,
+            beneficiaryId: $loan->beneficiary_id
+        );
+
+        \App\Models\Adjustment::create([
+            'adjustable_type' => $loan->getMorphClass(),
+            'adjustable_id'   => $loan->id,
+            'user_id'         => (int) $loan->user_id,
+            'beneficiary_id'  => $loan->beneficiary_id,
+            'as_of_period'    => $loan->issued_date
+                ? Carbon::parse($loan->issued_date, $tz)->format('Y-m')
+                : Carbon::now($tz)->format('Y-m'),
+            'amount'          => $amount,
+            'reason'          => $reason,
+            'transaction_id'  => $tx->id,
+            'created_by'      => $recordedBy,
+        ]);
+
+        return $loan->fresh([
+            'user:id,name,email,phone',
+            'beneficiary:id,guardian_user_id,name,relationship',
+            'beneficiary.guardian:id,name,email,phone',
+            'installments',
+            'repayments',
+        ]);
+    });
+}
 }

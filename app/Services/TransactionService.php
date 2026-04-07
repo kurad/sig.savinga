@@ -24,6 +24,10 @@ class TransactionService
         $debit = round((float) $debit, 2);
         $credit = round((float) $credit, 2);
 
+        if ($debit < 0 || $credit < 0) {
+            throw new Exception('Debit and credit amounts cannot be negative.');
+        }
+
         if ($debit > 0 && $credit > 0) {
             throw new Exception('A transaction cannot have both debit and credit amounts greater than zero.');
         }
@@ -76,79 +80,111 @@ class TransactionService
         $credit = (float) Transaction::sum('credit');
         $debit  = (float) Transaction::sum('debit');
 
-        return $credit - $debit;
+        return round($credit - $debit, 2);
     }
 
     public function memberSavings(int $userId, ?int $beneficiaryId = null): float
     {
+        $types = [
+            'opening_balance',
+            'opening_balance_adjustment',
+            'opening_savings',
+            'contribution',
+            'contribution_adjustment',
+            'profit',
+        ];
+
         $credit = (float) $this->ownerQuery($userId, $beneficiaryId)
-            ->whereIn('type', ['opening_balance', 'opening_savings', 'contribution', 'profit'])
+            ->whereIn('type', $types)
             ->sum('credit');
 
         $debit = (float) $this->ownerQuery($userId, $beneficiaryId)
-            ->whereIn('type', ['opening_balance', 'opening_savings', 'contribution', 'profit'])
+            ->whereIn('type', $types)
             ->sum('debit');
 
-        return $credit - $debit;
+        return round($credit - $debit, 2);
     }
 
     public function memberSavingsBaseForLoanLimit(int $userId, ?int $beneficiaryId = null): float
     {
-        return (float) $this->ownerQuery($userId, $beneficiaryId)
-            ->whereIn('type', ['opening_savings', 'opening_balance', 'contribution', 'profit'])
+        $types = [
+            'opening_savings',
+            'opening_balance',
+            'opening_balance_adjustment',
+            'contribution',
+            'contribution_adjustment',
+            'profit',
+        ];
+
+        $credit = (float) $this->ownerQuery($userId, $beneficiaryId)
+            ->whereIn('type', $types)
             ->sum('credit');
+
+        $debit = (float) $this->ownerQuery($userId, $beneficiaryId)
+            ->whereIn('type', $types)
+            ->sum('debit');
+
+        return round($credit - $debit, 2);
     }
 
     public function contributedMonthsCountFromLedger(int $userId, ?int $beneficiaryId = null): int
     {
         return (int) $this->ownerQuery($userId, $beneficiaryId)
-            ->where('type', 'contribution')
+            ->whereIn('type', ['contribution', 'contribution_adjustment'])
             ->distinct('reference')
             ->count('reference');
     }
+
     public function memberNetBalance(int $userId, ?int $beneficiaryId = null): float
     {
         $credit = (float) $this->ownerQuery($userId, $beneficiaryId)->sum('credit');
         $debit  = (float) $this->ownerQuery($userId, $beneficiaryId)->sum('debit');
 
-        return $credit - $debit;
+        return round($credit - $debit, 2);
     }
 
     public function memberLoanBalance(int $userId, ?int $beneficiaryId = null): float
     {
         $loanDisbursed = (float) $this->ownerQuery($userId, $beneficiaryId)
-            ->whereIn('type', ['opening_loan', 'loan_disbursement'])
+            ->whereIn('type', ['opening_loan', 'loan_disbursement', 'loan_adjustment'])
             ->sum('debit');
 
         $loanRepaid = (float) $this->ownerQuery($userId, $beneficiaryId)
             ->where('type', 'loan_repayment')
             ->sum('credit');
 
-        return max(0, $loanDisbursed - $loanRepaid);
+        $loanAdjustmentsPositive = (float) $this->ownerQuery($userId, $beneficiaryId)
+            ->where('type', 'loan_adjustment')
+            ->sum('credit');
+
+        return round(max(0, ($loanDisbursed - $loanRepaid) - $loanAdjustmentsPositive), 2);
     }
 
     public function memberLoanIssuedBase(int $userId, ?int $beneficiaryId = null): float
     {
-        return (float) $this->ownerQuery($userId, $beneficiaryId)
-            ->whereIn('type', ['opening_loan', 'loan_disbursement'])
+        $debit = (float) $this->ownerQuery($userId, $beneficiaryId)
+            ->whereIn('type', ['opening_loan', 'loan_disbursement', 'loan_adjustment'])
             ->sum('debit');
+
+        $credit = (float) $this->ownerQuery($userId, $beneficiaryId)
+            ->where('type', 'loan_adjustment')
+            ->sum('credit');
+
+        return round($debit - $credit, 2);
     }
 
     public function memberLoanRepaidTotal(int $userId, ?int $beneficiaryId = null): float
     {
-        return (float) $this->ownerQuery($userId, $beneficiaryId)
+        return round((float) $this->ownerQuery($userId, $beneficiaryId)
             ->where('type', 'loan_repayment')
-            ->sum('credit');
+            ->sum('credit'), 2);
     }
 
     public function totalPenaltiesAssessed(): float
     {
-        return (float) Transaction::where('type', 'penalty')->sum('credit');
+        return round((float) Transaction::where('type', 'penalty')->sum('credit'), 2);
     }
 
-    /**
-     * Total penalties outstanding = assessed - cleared (paid + waived).
-     */
     public function totalPenaltyOutstanding(): float
     {
         $assessed = (float) Transaction::where('type', 'penalty')->sum('credit');
@@ -156,7 +192,7 @@ class TransactionService
         $cleared = (float) Transaction::whereIn('type', ['penalty_paid', 'penalty_waived'])
             ->sum('debit');
 
-        return $assessed - $cleared;
+        return round($assessed - $cleared, 2);
     }
 
     public function memberPenaltyOutstanding(int $userId, ?int $beneficiaryId = null): float
@@ -169,7 +205,7 @@ class TransactionService
             ->whereIn('type', ['penalty_paid', 'penalty_waived'])
             ->sum('debit');
 
-        return $assessed - $cleared;
+        return round($assessed - $cleared, 2);
     }
 
     public function totalProfitAccrual(): float
@@ -179,40 +215,54 @@ class TransactionService
 
         $loanDisbursed = (float) Transaction::where('type', 'loan_disbursement')->sum('debit');
 
+        $loanAdjustmentCredits = (float) Transaction::where('type', 'loan_adjustment')->sum('credit');
+        $loanAdjustmentDebits = (float) Transaction::where('type', 'loan_adjustment')->sum('debit');
+
         $penaltiesAssessed = (float) Transaction::where('type', 'penalty')->sum('credit');
         $penaltiesWaived = (float) Transaction::where('type', 'penalty_waived')->sum('debit');
 
         $explicitProfit = (float) Transaction::where('type', 'profit')->sum('credit');
 
-        return ($loanRepayments + $interestUpfront - $loanDisbursed)
-            + ($penaltiesAssessed - $penaltiesWaived)
-            + $explicitProfit;
+        return round(
+            ($loanRepayments + $interestUpfront - $loanDisbursed + $loanAdjustmentCredits - $loanAdjustmentDebits)
+                + ($penaltiesAssessed - $penaltiesWaived)
+                + $explicitProfit,
+            2
+        );
     }
+
     public function savingsBaseForLoanLimit(int $userId, ?int $beneficiaryId = null): float
     {
-        return 0.7 * $this->memberSavings($userId, $beneficiaryId);
+        return round(max(0, 0.7 * $this->memberSavings($userId, $beneficiaryId)), 2);
     }
 
     public function availableCashBalance(): float
     {
         $credit = (float) Transaction::whereIn('type', [
             'opening_balance',
+            'opening_balance_adjustment',
             'opening_savings',
             'contribution',
+            'contribution_adjustment',
             'loan_repayment',
             'loan_interest_deducted',
             'penalty_paid',
             'investment_sale',
             'other_income',
+            'loan_adjustment',
         ])->sum('credit');
 
         $debit = (float) Transaction::whereIn('type', [
+            'opening_balance',
+            'opening_balance_adjustment',
+            'opening_savings',
             'loan_disbursement',
             'expense',
             'investment',
             'withdrawal',
+            'loan_adjustment',
         ])->sum('debit');
 
-        return $credit - $debit;
+        return round($credit - $debit, 2);
     }
 }

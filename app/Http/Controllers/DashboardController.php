@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\Loan;
 use App\Models\Penalty;
 use App\Models\Transaction;
-use App\Models\Expense;
 use App\Models\ProfitCycle;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -45,43 +44,47 @@ class DashboardController extends Controller
         }
 
         $periodAgg = $periodTxQ->selectRaw("
-            COALESCE(SUM(CASE WHEN type = 'contribution' THEN credit ELSE 0 END), 0) AS contrib_in,
-            COALESCE(SUM(CASE WHEN type IN ('contribution_reversal','contribution_undo') THEN debit ELSE 0 END), 0) AS contrib_rev,
+            COALESCE(SUM(CASE WHEN type IN ('contribution', 'contribution_adjustment') THEN credit ELSE 0 END), 0) AS contrib_credit,
+            COALESCE(SUM(CASE WHEN type IN ('contribution', 'contribution_adjustment', 'contribution_reversal', 'contribution_undo') THEN debit ELSE 0 END), 0) AS contrib_debit,
 
-            COALESCE(SUM(CASE WHEN type = 'loan_repayment' THEN credit ELSE 0 END), 0) AS repay_in,
-            COALESCE(SUM(CASE WHEN type IN ('loan_repayment_reversal','loan_repayment_undo') THEN debit ELSE 0 END), 0) AS repay_rev,
+            COALESCE(SUM(CASE WHEN type = 'loan_repayment' THEN credit ELSE 0 END), 0) AS repay_credit,
+            COALESCE(SUM(CASE WHEN type IN ('loan_repayment_reversal', 'loan_repayment_undo') THEN debit ELSE 0 END), 0) AS repay_debit,
 
-            COALESCE(SUM(CASE WHEN type = 'profit' THEN credit ELSE 0 END), 0) AS profit_in,
-            COALESCE(SUM(CASE WHEN type IN ('profit_reversal','profit_undo') THEN debit ELSE 0 END), 0) AS profit_rev,
+            COALESCE(SUM(CASE WHEN type = 'profit' THEN credit ELSE 0 END), 0) AS profit_credit,
+            COALESCE(SUM(CASE WHEN type IN ('profit_reversal', 'profit_undo') THEN debit ELSE 0 END), 0) AS profit_debit,
 
-            COALESCE(SUM(CASE WHEN type = 'penalty_paid' THEN credit ELSE 0 END), 0) AS penalty_in,
-            COALESCE(SUM(CASE WHEN type IN ('penalty_paid_reversal','penalty_paid_undo') THEN debit ELSE 0 END), 0) AS penalty_rev,
+            COALESCE(SUM(CASE WHEN type = 'penalty_paid' THEN credit ELSE 0 END), 0) AS penalty_credit,
+            COALESCE(SUM(CASE WHEN type IN ('penalty_paid', 'penalty_paid_reversal', 'penalty_paid_undo') THEN debit ELSE 0 END), 0) AS penalty_debit,
 
-            COALESCE(SUM(CASE WHEN type = 'loan_disbursement' THEN debit ELSE 0 END), 0) AS loan_out,
-            COALESCE(SUM(CASE WHEN type IN ('loan_disbursement_reversal','loan_disbursement_undo') THEN credit ELSE 0 END), 0) AS loan_out_rev
+            COALESCE(SUM(CASE WHEN type IN ('loan_disbursement', 'loan_adjustment') THEN debit ELSE 0 END), 0) AS loan_debit,
+            COALESCE(SUM(CASE WHEN type IN ('loan_adjustment', 'loan_disbursement_reversal', 'loan_disbursement_undo') THEN credit ELSE 0 END), 0) AS loan_credit
         ")->first();
 
-        $contribNet = (float) $periodAgg->contrib_in - (float) $periodAgg->contrib_rev;
-        $repayNet   = (float) $periodAgg->repay_in   - (float) $periodAgg->repay_rev;
-        $profitNet  = (float) $periodAgg->profit_in  - (float) $periodAgg->profit_rev;
-        $penaltyNet = (float) $periodAgg->penalty_in - (float) $periodAgg->penalty_rev;
-        $loanOutNet = (float) $periodAgg->loan_out   - (float) $periodAgg->loan_out_rev;
+        $contribNet = (float) $periodAgg->contrib_credit - (float) $periodAgg->contrib_debit;
+        $repayNet   = (float) $periodAgg->repay_credit   - (float) $periodAgg->repay_debit;
+        $profitNet  = (float) $periodAgg->profit_credit  - (float) $periodAgg->profit_debit;
+        $penaltyNet = (float) $periodAgg->penalty_credit - (float) $periodAgg->penalty_debit;
+        $loanOutNet = (float) $periodAgg->loan_debit     - (float) $periodAgg->loan_credit;
 
         // ============================
         // Expenses (period filtered)
         // ============================
-        // Usually only admins/treasurers should see group expenses.
-        $expensesTotal = 0.0;
-        if ($isPrivileged) {
-            $expQ = Expense::query();
-            $applyRange($expQ, 'expense_date');
-            $expensesTotal = (float) $expQ->sum('amount');
+        // Expense is already a ledger debit in your current design,
+        // so period expenses are derived from transactions instead of Expense model.
+        $periodExpenseQ = Transaction::query()
+            ->where('type', 'expense');
+
+        $applyRange($periodExpenseQ, 'created_at');
+
+        if (!$isPrivileged) {
+            $periodExpenseQ->where('user_id', $user->id);
         }
+
+        $expensesTotal = (float) $periodExpenseQ->sum('debit');
 
         // ============================
         // Cash balance (current, full history)
         // ============================
-        // For normal members, this should probably not be the group cash balance.
         $cashBalance = 0.0;
 
         if ($isPrivileged) {
@@ -92,9 +95,7 @@ class DashboardController extends Controller
                 ")
                 ->first();
 
-            $allExpenses = (float) Expense::query()->sum('amount');
-
-            $cashBalance = (float) $cashAgg->total_credit - (float) $cashAgg->total_debit - $allExpenses;
+            $cashBalance = (float) $cashAgg->total_credit - (float) $cashAgg->total_debit;
         } else {
             $memberCashAgg = Transaction::query()
                 ->where('user_id', $user->id)
@@ -117,7 +118,10 @@ class DashboardController extends Controller
         }
 
         $activeLoans = $activeLoansQ->get();
+
         $outstandingTotal = (float) $activeLoans->sum(fn ($l) => $l->outstandingBalance());
+        $outstandingPrincipal = (float) $activeLoans->sum(fn ($l) => $l->outstandingPrincipal());
+        $outstandingInterest = (float) $activeLoans->sum(fn ($l) => $l->outstandingInterest());
 
         $overdueLoansCountQ = Loan::where('status', 'active')
             ->whereDate('due_date', '<', now()->toDateString());
@@ -143,7 +147,6 @@ class DashboardController extends Controller
         // ============================
         // Profit cycle (current)
         // ============================
-        // Usually group-wide; hide from normal members if needed.
         $openCycle = $isPrivileged
             ? ProfitCycle::where('status', 'open')->latest()->first()
             : null;
@@ -162,7 +165,7 @@ class DashboardController extends Controller
         $recent = $recentQ
             ->latest()
             ->limit(10)
-            ->get(['id', 'user_id', 'type', 'debit', 'credit', 'reference', 'created_at']);
+            ->get(['id', 'user_id', 'beneficiary_id', 'type', 'debit', 'credit', 'reference', 'created_at']);
 
         return response()->json([
             'filters' => [
@@ -183,8 +186,10 @@ class DashboardController extends Controller
                 ],
 
                 'loans' => [
-                    'outstanding_total' => round($outstandingTotal, 2),
-                    'overdue_count' => $overdueLoansCount,
+                    'outstanding_total'     => round($outstandingTotal, 2),
+                    'outstanding_principal' => round($outstandingPrincipal, 2),
+                    'outstanding_interest'  => round($outstandingInterest, 2),
+                    'overdue_count'         => $overdueLoansCount,
                 ],
 
                 'penalties' => [

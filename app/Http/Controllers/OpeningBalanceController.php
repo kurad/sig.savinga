@@ -35,6 +35,17 @@ class OpeningBalanceController extends Controller
         ]);
     }
 
+    protected function validatePayload(Request $request): array
+    {
+        return $request->validate([
+            'user_id'        => ['nullable', 'integer', 'exists:users,id'],
+            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
+            'as_of_period'   => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
+            'amount'         => ['required', 'numeric'],
+            'note'           => ['nullable', 'string', 'max:255'],
+        ]);
+    }
+
     public function showByUser(Request $request, int $userId)
     {
         $request->validate([
@@ -42,6 +53,7 @@ class OpeningBalanceController extends Controller
         ]);
 
         $q = OpeningBalance::query()
+            ->with('adjustments')
             ->where('user_id', $userId)
             ->whereNull('beneficiary_id');
 
@@ -53,8 +65,40 @@ class OpeningBalanceController extends Controller
 
         $row = $q->first();
 
+        if (!$row) {
+            return response()->json([
+                'data' => null,
+            ]);
+        }
+
+        $adjustmentsTotal = round((float) $row->adjustments->sum('amount'), 2);
+        $originalAmount = round((float) $row->amount, 2);
+        $effectiveAmount = round($originalAmount + $adjustmentsTotal, 2);
+
         return response()->json([
-            'data' => $row,
+            'data' => [
+                'id' => $row->id,
+                'user_id' => $row->user_id,
+                'beneficiary_id' => $row->beneficiary_id,
+                'as_of_period' => $row->as_of_period,
+                'amount' => $originalAmount,
+                'original_amount' => $originalAmount,
+                'adjustments_total' => $adjustmentsTotal,
+                'effective_amount' => $effectiveAmount,
+                'note' => $row->note,
+                'transaction_id' => $row->transaction_id,
+                'created_by' => $row->created_by,
+                'created_at' => $row->created_at,
+                'adjustments' => $row->adjustments->map(function ($adj) {
+                    return [
+                        'id' => $adj->id,
+                        'amount' => round((float) $adj->amount, 2),
+                        'reason' => $adj->reason,
+                        'created_by' => $adj->created_by,
+                        'created_at' => $adj->created_at,
+                    ];
+                })->values(),
+            ],
         ]);
     }
 
@@ -67,6 +111,7 @@ class OpeningBalanceController extends Controller
         $beneficiary = Beneficiary::findOrFail($beneficiaryId);
 
         $q = OpeningBalance::query()
+            ->with('adjustments')
             ->where('user_id', $beneficiary->guardian_user_id)
             ->where('beneficiary_id', $beneficiaryId);
 
@@ -84,25 +129,45 @@ class OpeningBalanceController extends Controller
             ], 404);
         }
 
+        $adjustmentsTotal = round((float) $item->adjustments->sum('amount'), 2);
+        $originalAmount = round((float) $item->amount, 2);
+        $effectiveAmount = round($originalAmount + $adjustmentsTotal, 2);
+
         return response()->json([
-            'data' => $item,
+            'data' => [
+                'id' => $item->id,
+                'user_id' => $item->user_id,
+                'beneficiary_id' => $item->beneficiary_id,
+                'as_of_period' => $item->as_of_period,
+                'amount' => $originalAmount,
+                'original_amount' => $originalAmount,
+                'adjustments_total' => $adjustmentsTotal,
+                'effective_amount' => $effectiveAmount,
+                'note' => $item->note,
+                'transaction_id' => $item->transaction_id,
+                'created_by' => $item->created_by,
+                'created_at' => $item->created_at,
+                'adjustments' => $item->adjustments->map(function ($adj) {
+                    return [
+                        'id' => $adj->id,
+                        'amount' => round((float) $adj->amount, 2),
+                        'reason' => $adj->reason,
+                        'created_by' => $adj->created_by,
+                        'created_at' => $adj->created_at,
+                    ];
+                })->values(),
+            ],
         ]);
     }
 
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'user_id'        => ['nullable', 'integer', 'exists:users,id'],
-            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
-            'as_of_period'   => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
-            'amount'         => ['required', 'numeric', 'min:0'],
-            'note'           => ['nullable', 'string', 'max:255'],
-        ]);
+        $validated = $this->validatePayload($request);
 
         if (empty($validated['user_id']) && empty($validated['beneficiary_id'])) {
-            return response()->json([
-                'message' => 'Either user_id or beneficiary_id is required.',
-            ], 422);
+            throw ValidationException::withMessages([
+                'participant' => ['Either user_id or beneficiary_id is required.'],
+            ]);
         }
 
         $validated['user_id'] = $this->resolveOwnerUserId(
@@ -115,44 +180,16 @@ class OpeningBalanceController extends Controller
         $row = $this->service->setOpeningBalance($validated, $adminId);
 
         return response()->json([
-            'message' => 'Opening capital saved.',
+            'message' => 'Opening balance saved successfully.',
             'data'    => $row,
-        ]);
+        ], 201);
     }
 
     public function update(Request $request, OpeningBalance $openingBalance)
     {
-        $data = $request->validate([
-            'user_id'        => ['nullable', 'integer', 'exists:users,id'],
-            'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
-            'as_of_period'   => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
-            'amount'         => ['required', 'numeric', 'min:0'],
-            'note'           => ['nullable', 'string', 'max:1000'],
-        ]);
-
-        if (empty($data['user_id']) && empty($data['beneficiary_id'])) {
-            return response()->json([
-                'message' => 'Either user_id or beneficiary_id is required.',
-            ], 422);
-        }
-
-        $resolvedUserId = $this->resolveOwnerUserId(
-            $data['user_id'] ?? null,
-            $data['beneficiary_id'] ?? null
-        );
-
-        $openingBalance->update([
-            'user_id'        => $resolvedUserId,
-            'beneficiary_id' => $data['beneficiary_id'] ?? null,
-            'as_of_period'   => $data['as_of_period'],
-            'amount'         => $data['amount'],
-            'note'           => $data['note'] ?? null,
-        ]);
-
         return response()->json([
-            'message' => 'Opening balance updated successfully.',
-            'data' => $openingBalance->fresh(),
-        ]);
+            'message' => 'Opening balances cannot be edited directly after posting. Please use an adjustment/correction flow.',
+        ], 422);
     }
 
     public function myOpeningBalance(Request $request)

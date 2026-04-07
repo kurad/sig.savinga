@@ -2,9 +2,10 @@
 
 namespace App\Services;
 
+use App\Models\Adjustment;
 use App\Models\Contribution;
-use App\Models\ContributionBatch;
 use App\Models\ContributionAllocation;
+use App\Models\ContributionBatch;
 use App\Models\FinancialYearRule;
 use App\Models\MemberFinancialYear;
 use App\Models\Penalty;
@@ -352,11 +353,11 @@ class ContributionService
                     debit: 0,
                     credit: $alloc,
                     userId: $userId,
-                    beneficiaryId: $beneficiaryId,
                     reference: "[BATCH:{$batch->id}] Contribution Allocation (FY {$fy->year_key}, Period {$cursorPeriodKey}) ID {$envelope->id}",
                     createdBy: $recordedBy,
                     sourceType: 'contribution',
-                    sourceId: $envelope->id
+                    sourceId: $envelope->id,
+                    beneficiaryId: $beneficiaryId
                 );
 
                 ContributionAllocation::create([
@@ -429,6 +430,92 @@ class ContributionService
         });
     }
 
+    public function adjustContribution(
+        int $contributionId,
+        float $amount,
+        string $reason,
+        int $recordedBy
+    ): Contribution {
+        $amount = round((float) $amount, 2);
+        $reason = trim($reason);
+
+        if ($amount == 0.0) {
+            throw new InvalidArgumentException('Adjustment amount cannot be zero.');
+        }
+
+        if ($reason === '') {
+            throw new InvalidArgumentException('Adjustment reason is required.');
+        }
+
+        return DB::transaction(function () use ($contributionId, $amount, $reason, $recordedBy) {
+            $contribution = Contribution::query()
+                ->lockForUpdate()
+                ->findOrFail($contributionId);
+
+            $this->validateOwner((int) $contribution->user_id, $contribution->beneficiary_id);
+
+            $this->ensureOwnerFyOpen(
+                (int) $contribution->user_id,
+                $contribution->beneficiary_id,
+                (int) $contribution->financial_year_rule_id
+            );
+
+            $beforeAmount = round((float) $contribution->amount, 2);
+            $afterAmount = round($beforeAmount + $amount, 2);
+
+            if ($afterAmount < 0) {
+                throw new InvalidArgumentException('Contribution effective amount cannot go below zero.');
+            }
+
+            $tx = $this->ledger->record(
+                type: 'contribution_adjustment',
+                debit: $amount < 0 ? abs($amount) : 0,
+                credit: $amount > 0 ? $amount : 0,
+                userId: (int) $contribution->user_id,
+                reference: "Contribution adjustment for envelope {$contribution->id} ({$contribution->period_key}) — {$reason}",
+                createdBy: $recordedBy,
+                sourceType: 'contribution_adjustment',
+                sourceId: (int) $contribution->id,
+                beneficiaryId: $contribution->beneficiary_id
+            );
+
+            $contribution->amount = $afterAmount;
+            $contribution->recorded_by = $recordedBy;
+
+            if ($afterAmount <= 0 && !$contribution->paid_date) {
+                $contribution->status = 'missed';
+            } elseif ($contribution->paid_date) {
+                $expected = $contribution->expected_date
+                    ? Carbon::parse($contribution->expected_date, $this->tz)->startOfDay()
+                    : null;
+
+                $paid = $contribution->paid_date
+                    ? Carbon::parse($contribution->paid_date, $this->tz)->startOfDay()
+                    : null;
+
+                $contribution->status = ($expected && $paid && $paid->gt($expected))
+                    ? 'late'
+                    : 'paid';
+            }
+
+            $contribution->save();
+
+            Adjustment::create([
+                'adjustable_type' => $contribution->getMorphClass(),
+                'adjustable_id'   => $contribution->id,
+                'user_id'         => (int) $contribution->user_id,
+                'beneficiary_id'  => $contribution->beneficiary_id,
+                'as_of_period'    => $contribution->period_key,
+                'amount'          => $amount,
+                'reason'          => $reason,
+                'transaction_id'  => $tx->id,
+                'created_by'      => $recordedBy,
+            ]);
+
+            return $contribution->refresh();
+        });
+    }
+
     public function undoRecordedBatch(array $undoPayload, int $actorId): array
     {
         $batchRef = (string) ($undoPayload['batch_ref'] ?? '');
@@ -488,11 +575,11 @@ class ContributionService
                         debit: (float) ($r['allocated'] ?? 0),
                         credit: 0,
                         userId: $env->user_id,
-                        beneficiaryId: $env->beneficiary_id,
                         reference: "[BATCH:$batchRef] Undo contribution allocation for envelope {$env->id}",
                         createdBy: $actorId,
                         sourceType: 'contribution',
-                        sourceId: $env->id
+                        sourceId: $env->id,
+                        beneficiaryId: $env->beneficiary_id
                     );
                 }
 
@@ -641,44 +728,6 @@ class ContributionService
             ->count('period_key');
     }
 
-    public function openingBalanceForOwner(
-        int $userId,
-        ?int $beneficiaryId = null,
-        ?int $financialYearRuleId = null
-    ): float {
-        $this->validateOwner($userId, $beneficiaryId);
-
-        $fyId = $financialYearRuleId ?: (int) FinancialYearRule::where('is_active', true)->value('id');
-        if (!$fyId) {
-            throw new InvalidArgumentException('No active financial year found.');
-        }
-
-        $mfy = MemberFinancialYear::firstOrCreate(
-            [
-                'user_id' => $userId,
-                'beneficiary_id' => $beneficiaryId,
-                'financial_year_rule_id' => $fyId,
-            ],
-            [
-                'opening_balance' => 0,
-                'commitment_amount' => 0,
-            ]
-        );
-
-        return (float) $mfy->opening_balance;
-    }
-
-    public function savingsBaseForLoanLimit(
-        int $userId,
-        ?int $beneficiaryId = null,
-        ?int $financialYearRuleId = null
-    ): float {
-        $opening = $this->openingBalanceForOwner($userId, $beneficiaryId, $financialYearRuleId);
-        $contrib = $this->totalContributionsForOwner($userId, $beneficiaryId, $financialYearRuleId);
-
-        return round($opening + $contrib, 2);
-    }
-
     public function recordSinglePeriod(
         int $userId,
         ?int $beneficiaryId,
@@ -779,11 +828,11 @@ class ContributionService
                 debit: 0,
                 credit: $amount,
                 userId: $userId,
-                beneficiaryId: $beneficiaryId,
                 reference: 'Contribution (FY ' . $fy->year_key . ', Period ' . $periodKey . ') ID ' . $envelope->id,
                 createdBy: $recordedBy,
                 sourceType: 'contribution',
-                sourceId: $envelope->id
+                sourceId: $envelope->id,
+                beneficiaryId: $beneficiaryId
             );
 
             if ($isLate && (float) ($envelope->penalty_amount ?? 0) <= 0) {
@@ -881,11 +930,11 @@ class ContributionService
                                 debit: $reverseDebit,
                                 credit: $reverseCredit,
                                 userId: (int) $tx->user_id,
-                                beneficiaryId: $tx->beneficiary_id,
                                 reference: 'Reversal of transaction ID ' . $tx->id . ' from contribution batch ID ' . $batch->id,
                                 createdBy: $reversedBy,
                                 sourceType: 'contribution_batch_reversal',
-                                sourceId: $batch->id
+                                sourceId: $batch->id,
+                                beneficiaryId: $tx->beneficiary_id
                             );
                         }
                     }
@@ -1004,11 +1053,11 @@ class ContributionService
                         debit: $reverseDebit,
                         credit: $reverseCredit,
                         userId: (int) $penalty->user_id,
-                        beneficiaryId: $penalty->beneficiary_id,
                         reference: 'Reversal of penalty ID ' . $penalty->id . ' from contribution batch ID ' . $batchId,
                         createdBy: $reversedBy,
                         sourceType: 'penalty_reversal',
-                        sourceId: $penalty->id
+                        sourceId: $penalty->id,
+                        beneficiaryId: $penalty->beneficiary_id
                     );
                 }
             }

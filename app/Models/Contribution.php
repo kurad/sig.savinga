@@ -112,4 +112,13 @@ class Contribution extends Model
     {
         return !is_null($this->beneficiary_id);
     }
+    public function adjustments()
+    {
+        return $this->morphMany(\App\Models\Adjustment::class, 'adjustable');
+    }
+
+    public function effectiveAmount(): float
+    {
+        return round((float) $this->amount + (float) $this->adjustments()->sum('amount'), 2);
+    }
 }

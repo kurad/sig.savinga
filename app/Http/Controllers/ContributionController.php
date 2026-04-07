@@ -44,6 +44,7 @@ class ContributionController extends Controller
                 : null,
         ];
     }
+
     public function index(Request $request)
     {
         $filters = $request->validate([
@@ -62,6 +63,7 @@ class ContributionController extends Controller
 
         return response()->json($data);
     }
+
     public function store(StoreContributionRequest $request)
     {
         ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveParticipantFromRequest($request);
@@ -106,10 +108,6 @@ class ContributionController extends Controller
         ]);
     }
 
-    /**
-     * Mark missed contribution
-     * POST /api/contributions/missed
-     */
     public function markMissed(MarkMissedContributionRequest $request)
     {
         ['userId' => $userId, 'beneficiaryId' => $beneficiaryId] = $this->resolveParticipantFromRequest($request);
@@ -139,9 +137,6 @@ class ContributionController extends Controller
         ], 201);
     }
 
-    /**
-     * Still user-based until report service is reviewed for beneficiaries too.
-     */
     public function memberSummary(Request $request, User $user)
     {
         try {
@@ -161,6 +156,7 @@ class ContributionController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
     }
+
     public function bulkPreview(BulkContributionPreviewRequest $request)
     {
         $period = $request->query('period');
@@ -206,7 +202,7 @@ class ContributionController extends Controller
 
                 if (!$openingSet) {
                     $canProcess = false;
-                    $reason = 'Opening capital not set.';
+                    $reason = 'Opening balance not set.';
                 }
 
                 if (!$commitment) {
@@ -261,20 +257,18 @@ class ContributionController extends Controller
         $membersQuery = User::query()
             ->select(['id', 'name', 'email', 'phone', 'role']);
 
-        if (!$request->boolean('include_inactive')) {
-            // $membersQuery->where('is_active', 1);
-        }
-
         $members = $membersQuery->orderBy('name')->get();
 
         $openingByUser = OpeningBalance::query()
             ->whereIn('user_id', $members->pluck('id'))
+            ->whereNull('beneficiary_id')
             ->get()
             ->keyBy('user_id');
 
         $existingByUser = Contribution::query()
             ->where('period_key', $periodKey)
             ->whereIn('user_id', $members->pluck('id'))
+            ->whereNull('beneficiary_id')
             ->get()
             ->keyBy('user_id');
 
@@ -291,7 +285,7 @@ class ContributionController extends Controller
 
             if (!$openingSet) {
                 $canProcess = false;
-                $reason = 'Opening capital not set.';
+                $reason = 'Opening balance not set.';
             }
 
             if (!$commitment) {
@@ -453,7 +447,7 @@ class ContributionController extends Controller
                         'beneficiary_id' => $beneficiaryId,
                         'action' => 'skipped_no_opening_balance',
                         'period_key' => $periodKey,
-                        'message' => 'Opening capital not set.',
+                        'message' => 'Opening balance not set.',
                     ];
                     $results['totals']['ok']++;
                     $results['totals']['skipped']++;
@@ -468,7 +462,7 @@ class ContributionController extends Controller
                         'action' => 'skipped_before_opening_period',
                         'period_key' => $periodKey,
                         'opening_as_of' => $opening->as_of_period,
-                        'message' => 'Period is before opening capital as-of period.',
+                        'message' => 'Period is before opening balance as-of period.',
                     ];
                     $results['totals']['ok']++;
                     $results['totals']['skipped']++;
@@ -618,10 +612,6 @@ class ContributionController extends Controller
         ], 200);
     }
 
-    /**
-     * Preview a single contribution allocation.
-     * No owner_type needed.
-     */
     public function preview(Request $request)
     {
         $request->validate([
@@ -676,6 +666,7 @@ class ContributionController extends Controller
             ], 422);
         }
     }
+
     public function undoLast(Request $request)
     {
         $request->validate([

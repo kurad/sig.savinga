@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AdjustmentController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\BeneficiaryController;
 use App\Http\Controllers\CommitmentController;
@@ -13,6 +14,7 @@ use App\Http\Controllers\FinancialYearRuleController;
 use App\Http\Controllers\IncomeController;
 use App\Http\Controllers\InvestmentController;
 use App\Http\Controllers\LoanController;
+use App\Http\Controllers\LoanMigrationController;
 use App\Http\Controllers\MeContributionController;
 use App\Http\Controllers\MemberController;
 use App\Http\Controllers\MemberFinancialYearController;
@@ -166,6 +168,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/opening-balances/user/{userId}', [OpeningBalanceController::class, 'showByUser']);
         Route::get('/opening-balances/beneficiary/{beneficiaryId}', [OpeningBalanceController::class, 'showByBeneficiary']);
 
+        //Loan migration
+        Route::post('/loan-migrations', [LoanMigrationController::class, 'storeFromMember']);
+        Route::post('/loans/{loan}/migration', [LoanMigrationController::class, 'store']);
+        Route::get('/loans/{loan}/migration/outstanding', [LoanMigrationController::class, 'outstanding']);
+        Route::get('/loans/{loan}/migration/summary', [LoanMigrationController::class, 'summary']);
 
         // Financial year rules (admin settings)
         Route::get('/financial-year-rules', [FinancialYearRuleController::class, 'index']);
@@ -185,5 +192,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('/system-rules', [SystemRuleController::class, 'show']);
         Route::put('/system-rules', [SystemRuleController::class, 'update']);
+
+
+
+        Route::post('/opening-balances/{openingBalance}/adjustments', [AdjustmentController::class, 'storeOpeningBalance']);
+        Route::post('/contributions/{contribution}/adjustments', [AdjustmentController::class, 'storeContribution']);
+        Route::post('/loans/{loan}/adjustments', [AdjustmentController::class, 'storeLoan']);
     });
 });

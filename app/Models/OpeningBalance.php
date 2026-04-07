@@ -16,4 +16,13 @@ class OpeningBalance extends Model
         'created_by',
         'updated_by',
     ];
+    public function adjustments()
+    {
+        return $this->morphMany(\App\Models\Adjustment::class, 'adjustable');
+    }
+
+    public function effectiveAmount(): float
+    {
+        return round((float) $this->amount + (float) $this->adjustments()->sum('amount'), 2);
+    }
 }

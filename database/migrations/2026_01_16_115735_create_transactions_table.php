@@ -35,7 +35,10 @@ return new class extends Migration
                 'donation',
                 'fine',
                 'other',
-                
+                'opening_balance_adjustment',
+                'contribution_adjustment',
+                'loan_adjustment',
+
             ]);
             $table->decimal('debit', 10, 2)->default(0);
             $table->decimal('credit', 10, 2)->default(0);
