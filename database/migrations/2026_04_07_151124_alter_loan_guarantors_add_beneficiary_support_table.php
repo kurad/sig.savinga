@@ -3,7 +3,6 @@
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\DB;
 
 return new class extends Migration {
     public function up(): void
@@ -20,26 +19,32 @@ return new class extends Migration {
                 ->nullOnDelete();
         });
 
+        // Add standalone indexes first so MySQL no longer depends on the old composite unique
         Schema::table('loan_guarantors', function (Blueprint $table) {
-            $table->dropUnique(['loan_id', 'guarantor_user_id']);
+            $table->index('loan_id', 'loan_guarantors_loan_id_index');
+            $table->index('guarantor_user_id', 'loan_guarantors_guarantor_user_id_index');
         });
 
-        DB::statement("
-            UPDATE loan_guarantors
-            SET participant_type = 'user'
-            WHERE participant_type IS NULL OR participant_type = ''
-        ");
+        // Now drop the old composite unique
+        Schema::table('loan_guarantors', function (Blueprint $table) {
+            $table->dropUnique('loan_guarantors_loan_id_guarantor_user_id_unique');
+        });
     }
 
     public function down(): void
     {
         Schema::table('loan_guarantors', function (Blueprint $table) {
-            $table->dropConstrainedForeignId('beneficiary_id');
-            $table->dropColumn('participant_type');
+            $table->unique(['loan_id', 'guarantor_user_id'], 'loan_guarantors_loan_id_guarantor_user_id_unique');
         });
 
         Schema::table('loan_guarantors', function (Blueprint $table) {
-            $table->unique(['loan_id', 'guarantor_user_id']);
+            $table->dropIndex('loan_guarantors_loan_id_index');
+            $table->dropIndex('loan_guarantors_guarantor_user_id_index');
+        });
+
+        Schema::table('loan_guarantors', function (Blueprint $table) {
+            $table->dropConstrainedForeignId('beneficiary_id');
+            $table->dropColumn('participant_type');
         });
     }
 };
