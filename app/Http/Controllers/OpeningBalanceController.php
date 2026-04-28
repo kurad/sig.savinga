@@ -41,9 +41,57 @@ class OpeningBalanceController extends Controller
             'user_id'        => ['nullable', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
             'as_of_period'   => ['required', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
-            'amount'         => ['required', 'numeric'],
+
+            // Allows positive and negative opening balances, but blocks zero.
+            'amount'         => ['required', 'numeric', 'not_in:0'],
+
             'note'           => ['nullable', 'string', 'max:255'],
         ]);
+    }
+
+    protected function formatOpeningBalance(?OpeningBalance $opening): ?array
+    {
+        if (!$opening) {
+            return null;
+        }
+
+        if (!$opening->relationLoaded('adjustments')) {
+            $opening->load('adjustments');
+        }
+
+        $originalAmount = round((float) $opening->amount, 2);
+        $adjustmentsTotal = round((float) $opening->adjustments->sum('amount'), 2);
+        $effectiveAmount = round($originalAmount + $adjustmentsTotal, 2);
+
+        return [
+            'id' => $opening->id,
+            'user_id' => $opening->user_id,
+            'beneficiary_id' => $opening->beneficiary_id,
+            'as_of_period' => $opening->as_of_period,
+
+            // Keep amount as effective amount for frontend display.
+            'amount' => $effectiveAmount,
+
+            // Keep clear accounting fields.
+            'original_amount' => $originalAmount,
+            'adjustments_total' => $adjustmentsTotal,
+            'effective_amount' => $effectiveAmount,
+
+            'note' => $opening->note,
+            'transaction_id' => $opening->transaction_id,
+            'created_by' => $opening->created_by,
+            'created_at' => $opening->created_at,
+
+            'adjustments' => $opening->adjustments->map(function ($adj) {
+                return [
+                    'id' => $adj->id,
+                    'amount' => round((float) $adj->amount, 2),
+                    'reason' => $adj->reason,
+                    'created_by' => $adj->created_by,
+                    'created_at' => $adj->created_at,
+                ];
+            })->values(),
+        ];
     }
 
     public function showByUser(Request $request, int $userId)
@@ -52,53 +100,21 @@ class OpeningBalanceController extends Controller
             'as_of_period' => ['nullable', 'regex:/^\d{4}\-(0[1-9]|1[0-2])$/'],
         ]);
 
-        $q = OpeningBalance::query()
+        $query = OpeningBalance::query()
             ->with('adjustments')
             ->where('user_id', $userId)
             ->whereNull('beneficiary_id');
 
         if ($request->filled('as_of_period')) {
-            $q->where('as_of_period', $request->as_of_period);
+            $query->where('as_of_period', $request->as_of_period);
         } else {
-            $q->orderByDesc('as_of_period')->orderByDesc('id');
+            $query->orderByDesc('as_of_period')->orderByDesc('id');
         }
 
-        $row = $q->first();
-
-        if (!$row) {
-            return response()->json([
-                'data' => null,
-            ]);
-        }
-
-        $adjustmentsTotal = round((float) $row->adjustments->sum('amount'), 2);
-        $originalAmount = round((float) $row->amount, 2);
-        $effectiveAmount = round($originalAmount + $adjustmentsTotal, 2);
+        $opening = $query->first();
 
         return response()->json([
-            'data' => [
-                'id' => $row->id,
-                'user_id' => $row->user_id,
-                'beneficiary_id' => $row->beneficiary_id,
-                'as_of_period' => $row->as_of_period,
-                'amount' => $originalAmount,
-                'original_amount' => $originalAmount,
-                'adjustments_total' => $adjustmentsTotal,
-                'effective_amount' => $effectiveAmount,
-                'note' => $row->note,
-                'transaction_id' => $row->transaction_id,
-                'created_by' => $row->created_by,
-                'created_at' => $row->created_at,
-                'adjustments' => $row->adjustments->map(function ($adj) {
-                    return [
-                        'id' => $adj->id,
-                        'amount' => round((float) $adj->amount, 2),
-                        'reason' => $adj->reason,
-                        'created_by' => $adj->created_by,
-                        'created_at' => $adj->created_at,
-                    ];
-                })->values(),
-            ],
+            'data' => $this->formatOpeningBalance($opening),
         ]);
     }
 
@@ -110,53 +126,27 @@ class OpeningBalanceController extends Controller
 
         $beneficiary = Beneficiary::findOrFail($beneficiaryId);
 
-        $q = OpeningBalance::query()
+        if (empty($beneficiary->guardian_user_id)) {
+            throw ValidationException::withMessages([
+                'beneficiary_id' => ['Selected beneficiary has no guardian user linked.'],
+            ]);
+        }
+
+        $query = OpeningBalance::query()
             ->with('adjustments')
             ->where('user_id', $beneficiary->guardian_user_id)
             ->where('beneficiary_id', $beneficiaryId);
 
         if ($request->filled('as_of_period')) {
-            $q->where('as_of_period', $request->as_of_period);
+            $query->where('as_of_period', $request->as_of_period);
         } else {
-            $q->orderByDesc('as_of_period')->orderByDesc('id');
+            $query->orderByDesc('as_of_period')->orderByDesc('id');
         }
 
-        $item = $q->first();
-
-        if (!$item) {
-            return response()->json([
-                'message' => 'Opening balance not found for this beneficiary.',
-            ], 404);
-        }
-
-        $adjustmentsTotal = round((float) $item->adjustments->sum('amount'), 2);
-        $originalAmount = round((float) $item->amount, 2);
-        $effectiveAmount = round($originalAmount + $adjustmentsTotal, 2);
+        $opening = $query->first();
 
         return response()->json([
-            'data' => [
-                'id' => $item->id,
-                'user_id' => $item->user_id,
-                'beneficiary_id' => $item->beneficiary_id,
-                'as_of_period' => $item->as_of_period,
-                'amount' => $originalAmount,
-                'original_amount' => $originalAmount,
-                'adjustments_total' => $adjustmentsTotal,
-                'effective_amount' => $effectiveAmount,
-                'note' => $item->note,
-                'transaction_id' => $item->transaction_id,
-                'created_by' => $item->created_by,
-                'created_at' => $item->created_at,
-                'adjustments' => $item->adjustments->map(function ($adj) {
-                    return [
-                        'id' => $adj->id,
-                        'amount' => round((float) $adj->amount, 2),
-                        'reason' => $adj->reason,
-                        'created_by' => $adj->created_by,
-                        'created_at' => $adj->created_at,
-                    ];
-                })->values(),
-            ],
+            'data' => $this->formatOpeningBalance($opening),
         ]);
     }
 
@@ -177,11 +167,13 @@ class OpeningBalanceController extends Controller
 
         $adminId = (int) auth()->id();
 
-        $row = $this->service->setOpeningBalance($validated, $adminId);
+        $opening = $this->service->setOpeningBalance($validated, $adminId);
+
+        $opening->load('adjustments');
 
         return response()->json([
             'message' => 'Opening balance saved successfully.',
-            'data'    => $row,
+            'data' => $this->formatOpeningBalance($opening),
         ], 201);
     }
 
@@ -197,22 +189,34 @@ class OpeningBalanceController extends Controller
         $me = $request->user();
 
         $opening = OpeningBalance::query()
+            ->with('adjustments')
             ->where('user_id', $me->id)
             ->whereNull('beneficiary_id')
-            ->latest('as_of_period')
+            ->orderByDesc('as_of_period')
+            ->orderByDesc('id')
             ->first();
+
+        if (!$opening) {
+            return response()->json([
+                'message' => 'OK',
+                'data' => [
+                    'set' => false,
+                    'amount' => 0,
+                    'original_amount' => 0,
+                    'adjustments_total' => 0,
+                    'effective_amount' => 0,
+                    'as_of_period' => null,
+                ],
+            ]);
+        }
+
+        $data = $this->formatOpeningBalance($opening);
 
         return response()->json([
             'message' => 'OK',
-            'data' => $opening ? [
+            'data' => array_merge($data, [
                 'set' => true,
-                'amount' => (float) $opening->amount,
-                'as_of_period' => $opening->as_of_period,
-            ] : [
-                'set' => false,
-                'amount' => 0,
-                'as_of_period' => null,
-            ],
+            ]),
         ]);
     }
 }

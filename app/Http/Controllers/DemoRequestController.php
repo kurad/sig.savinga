@@ -6,11 +6,16 @@ use App\Http\Requests\StoreDemoRequestRequest;
 use App\Mail\DemoRequestConfirmation;
 use App\Mail\DemoRequestNotification;
 use App\Models\DemoRequest;
-use Illuminate\Http\Request;
+// use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
 
 class DemoRequestController extends Controller
 {
+    public function index()
+    {
+        $demoRequests = DemoRequest::latest()->get();
+        return response()->json($demoRequests);
+    }
     public function store(StoreDemoRequestRequest  $request)
     {
         

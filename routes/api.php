@@ -38,6 +38,7 @@ Route::prefix('auth/login')->group(function () {
     Route::post('/email/verify',  [LoginController::class, 'verifyEmailCode']);
 });
 Route::post('/demo-requests', [DemoRequestController::class, 'store']);
+Route::get('/demo-requests', [DemoRequestController::class, 'index']);
 
 // OTP
 Route::post('/auth/otp-sms/request', [OtpAuthController::class, 'login'])->middleware('throttle:10,1');
