@@ -13,6 +13,9 @@ use App\Services\MemberService;
 use Illuminate\Http\Request;
 use Maatwebsite\Excel\Facades\Excel;
 
+use App\Exports\GroupFinancialExport;
+use App\Services\OpeningBalanceService;
+
 class MemberController extends Controller
 {
     public function __construct(
@@ -304,4 +307,12 @@ class MemberController extends Controller
             'data' => $result,
         ]);
     }
+
+    public function exportGroupFinancialReport(OpeningBalanceService $openingBalanceService)
+{
+    return Excel::download(
+        new GroupFinancialExport($openingBalanceService),
+        'group_financial_report.xlsx'
+    );
+}
 }

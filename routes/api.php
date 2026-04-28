@@ -94,6 +94,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/opening-balances/beneficiary/{beneficiaryId}', [OpeningBalanceController::class, 'showByBeneficiary']);
         Route::put('/opening-balances/{openingBalance}', [OpeningBalanceController::class, 'update']);
 
+        Route::get('/reports/group-financial/export', [MemberController::class, 'exportGroupFinancialReport']);
         Route::get('/commitments/by-participant', [CommitmentController::class, 'showByParticipant']);
         Route::put('/commitments/{commitment}', [CommitmentController::class, 'update']);
 
