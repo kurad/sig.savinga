@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use App\Services\StatementService;
-use App\Http\Controllers\Controller;
 use App\Services\StatementReportService;
 
 class StatementController extends Controller
@@ -18,16 +17,24 @@ class StatementController extends Controller
     public function index(Request $request)
     {
         $perPage = (int) $request->query('per_page', 15);
-        $perPage = max(5, min($perPage, 200)); // safety
+        $perPage = max(5, min($perPage, 200));
 
-        $data = $this->statementReportService->list(
-            filters: $request->only(['user_id', 'type', 'from', 'to', 'q']),
+        $result = $this->statementReportService->list(
+            filters: $request->only([
+                'financial_year_rule_id',
+                'user_id',
+                'type',
+                'from',
+                'to',
+                'q',
+            ]),
             perPage: $perPage
         );
 
         return response()->json([
             'message' => 'Group statement',
-            'data' => $data,
+            'data' => $result['data'],
+            'totals' => $result['totals'],
         ]);
     }
 

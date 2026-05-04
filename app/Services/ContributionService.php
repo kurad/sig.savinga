@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Adjustment;
+use App\Models\Beneficiary;
 use App\Models\Contribution;
 use App\Models\ContributionAllocation;
 use App\Models\ContributionBatch;
@@ -1138,8 +1139,21 @@ class ContributionService
             throw new InvalidArgumentException('user_id is required and must be a valid positive integer.');
         }
 
-        if (!is_null($beneficiaryId) && $beneficiaryId <= 0) {
-            throw new InvalidArgumentException('beneficiary_id must be a valid positive integer when provided.');
+        if (!is_null($beneficiaryId)) {
+            if ($beneficiaryId <= 0) {
+                throw new InvalidArgumentException('beneficiary_id must be a valid positive integer when provided.');
+            }
+
+            $belongs = Beneficiary::query()
+                ->where('id', $beneficiaryId)
+                ->where('guardian_user_id', $userId)
+                ->exists();
+
+            if (!$belongs) {
+                throw new InvalidArgumentException(
+                    'Selected beneficiary does not belong to the selected member.'
+                );
+            }
         }
     }
 

@@ -20,7 +20,10 @@ class BeneficiaryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Beneficiary::query();
+        $perPage = min((int) $request->get('per_page', 15), 500);
+
+        $query = Beneficiary::query()
+            ->with(['guardian:id,name,email,phone']);
 
         if ($request->filled('guardian_user_id')) {
             $query->where('guardian_user_id', $request->guardian_user_id);
@@ -30,11 +33,12 @@ class BeneficiaryController extends Controller
             $query->where('is_active', filter_var($request->is_active, FILTER_VALIDATE_BOOLEAN));
         }
 
-        $beneficiaries = $query->latest()->paginate($request->get('per_page', 15));
+        $beneficiaries = $query
+            ->latest()
+            ->paginate($perPage);
 
         return response()->json($beneficiaries);
     }
-
     /**
      * Store a newly created beneficiary.
      */

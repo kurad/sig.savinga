@@ -3,19 +3,13 @@
 namespace App\Services;
 
 use App\Models\Transaction;
-use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 
 class StatementReportService
 {
-    /**
-     * Admin: Group ledger list
-     * Filters: user_id, type, from, to, q
-     */
-    public function list(array $filters, int $perPage = 15): LengthAwarePaginator
+    public function list(array $filters, int $perPage = 15): array
     {
         $q = Transaction::query()
-            ->with(['user:id,name,email,phone'])
-            ->orderByDesc('created_at');
+            ->with(['user:id,name,email,phone']);
 
         if (!empty($filters['user_id'])) {
             $q->where('user_id', (int) $filters['user_id']);
@@ -33,15 +27,35 @@ class StatementReportService
             $q->whereDate('created_at', '<=', $filters['to']);
         }
 
-        // Search in reference (and optionally type)
         if (!empty($filters['q'])) {
             $term = trim((string) $filters['q']);
+
             $q->where(function ($sub) use ($term) {
                 $sub->where('reference', 'like', "%{$term}%")
-                    ->orWhere('type', 'like', "%{$term}%");
+                    ->orWhere('type', 'like', "%{$term}%")
+                    ->orWhere('source_type', 'like', "%{$term}%");
             });
         }
 
-        return $q->paginate($perPage);
+        $totals = (clone $q)
+            ->selectRaw("
+                COALESCE(SUM(credit), 0) as credit,
+                COALESCE(SUM(debit), 0) as debit,
+                COALESCE(SUM(credit), 0) - COALESCE(SUM(debit), 0) as net
+            ")
+            ->first();
+
+        $data = $q
+            ->orderByDesc('created_at')
+            ->paginate($perPage);
+
+        return [
+            'data' => $data,
+            'totals' => [
+                'credit' => round((float) $totals->credit, 2),
+                'debit' => round((float) $totals->debit, 2),
+                'net' => round((float) $totals->net, 2),
+            ],
+        ];
     }
 }

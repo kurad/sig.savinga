@@ -90,6 +90,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::post('/beneficiaries', [BeneficiaryController::class, 'store']);
         Route::patch('beneficiaries/{beneficiary}/set-active', [BeneficiaryController::class, 'setActive']);
+        Route::get('/beneficiaries', [BeneficiaryController::class, 'index']);
+        Route::get('/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'show']);
+        Route::put('/beneficiaries/{beneficiary}', [BeneficiaryController::class, 'update']);
 
         Route::get('/opening-balances/beneficiary/{beneficiaryId}', [OpeningBalanceController::class, 'showByBeneficiary']);
         Route::put('/opening-balances/{openingBalance}', [OpeningBalanceController::class, 'update']);

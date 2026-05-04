@@ -183,27 +183,44 @@ class MemberFinancialYearService
 
     protected function validateOwner(?int $userId, ?int $beneficiaryId): void
     {
-        $hasUser = !is_null($userId);
-        $hasBeneficiary = !is_null($beneficiaryId);
-
-        if (($hasUser && $hasBeneficiary) || (!$hasUser && !$hasBeneficiary)) {
+        if (is_null($userId) || (int) $userId <= 0) {
             throw ValidationException::withMessages([
-                'owner' => 'Record must belong to either a user or a beneficiary.',
+                'user_id' => 'Member is required.',
+            ]);
+        }
+
+        if (!is_null($beneficiaryId) && (int) $beneficiaryId <= 0) {
+            throw ValidationException::withMessages([
+                'beneficiary_id' => 'Beneficiary ID must be valid.',
             ]);
         }
     }
 
     protected function ownerQuery(?int $userId, ?int $beneficiaryId)
     {
-        return MemberFinancialYear::query()
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+        $query = MemberFinancialYear::query()
+            ->where('user_id', $userId);
+
+        if (is_null($beneficiaryId)) {
+            $query->whereNull('beneficiary_id');
+        } else {
+            $query->where('beneficiary_id', $beneficiaryId);
+        }
+
+        return $query;
     }
 
     protected function ownerContributionQuery(?int $userId, ?int $beneficiaryId)
     {
-        return Contribution::query()
-            ->when(!is_null($userId), fn ($q) => $q->where('user_id', $userId))
-            ->when(!is_null($beneficiaryId), fn ($q) => $q->where('beneficiary_id', $beneficiaryId));
+        $query = Contribution::query()
+            ->where('user_id', $userId);
+
+        if (is_null($beneficiaryId)) {
+            $query->whereNull('beneficiary_id');
+        } else {
+            $query->where('beneficiary_id', $beneficiaryId);
+        }
+
+        return $query;
     }
 }
