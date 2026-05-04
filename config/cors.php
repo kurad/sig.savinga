@@ -22,6 +22,7 @@ return [
     'allowed_origins' => [
         'http://localhost:8080', 
         'https://savinga.rw',
+        'https://sig.savinga.rw',
         ],
 
     'allowed_origins_patterns' => [],
