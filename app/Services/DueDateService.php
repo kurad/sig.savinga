@@ -129,13 +129,25 @@ class DueDateService
 
         $dueDate = $dueMonth->copy()->day($finalDay)->startOfDay();
 
-        $overdueFrom    = $dueDate->copy()->addDays($graceDays);
-        $daysRemaining  = $now->copy()->startOfDay()->diffInDays($dueDate, false);
-        $isOverdue      = $now->copy()->startOfDay()->gt($overdueFrom);
+        $today = $now->copy()->startOfDay();
+
+        $overdueFrom = $dueDate->copy()->addDays($graceDays)->startOfDay();
+
+        // Overdue only after the due date + grace days
+        $isOverdue = $today->gt($overdueFrom);
+
+        $daysRemaining = $today->diffInDays($dueDate, false);
 
         $hint = 'ok';
-        if ($isOverdue) $hint = 'overdue';
-        elseif ($daysRemaining <= 5) $hint = 'due_soon';
+
+        if ($amountDue <= 0) {
+            $hint = 'ok';
+            $isOverdue = false;
+        } elseif ($isOverdue) {
+            $hint = 'overdue';
+        } elseif ($daysRemaining >= 0 && $daysRemaining <= 5) {
+            $hint = 'due_soon';
+        }
 
         // already_funded for UI = what is credited toward this period (includes forward credit)
         // BUT if you also want "posted in this period only", use period_posted_amount
