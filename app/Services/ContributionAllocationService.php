@@ -3,32 +3,11 @@
 namespace App\Services;
 
 use App\Models\Contribution;
+use App\Models\FinancialYearRule;
 use Carbon\Carbon;
 
 class ContributionAllocationService
 {
-    /**
-     * Build allocation rows for a member, applying carry-forward logic.
-     *
-     * @return array{
-     *   meta: array{
-     *     from: string,
-     *     to: string,
-     *     commitment_amount: float,
-     *     paid_through_period: string|null,
-     *     credit_balance: float
-     *   },
-     *   allocation: array<int, array{
-     *     period_key: string,
-     *     required: float,
-     *     posted: float,
-     *     forward_in: float,
-     *     credited: float,
-     *     status: string,
-     *     carry_out: float
-     *   }>
-     * }
-     */
     public function buildAllocation(int $memberId, float $commitmentAmount, string $fromPeriod, string $toPeriod): array
     {
         $tz = 'Africa/Kigali';
@@ -36,15 +15,17 @@ class ContributionAllocationService
         $from = Carbon::createFromFormat('Y-m', $fromPeriod, $tz)->startOfMonth();
         $to   = Carbon::createFromFormat('Y-m', $toPeriod, $tz)->startOfMonth();
 
-        // Ensure correct ordering
         if ($from->gt($to)) {
             [$from, $to] = [$to, $from];
         }
 
+        $fy = FinancialYearRule::query()
+            ->where('is_active', true)
+            ->firstOrFail();
+
         $fromKey = $from->format('Y-m');
         $toKey   = $to->format('Y-m');
 
-        // Sum posted per period_key (multiple rows per month are possible)
         $rows = Contribution::query()
             ->where('user_id', $memberId)
             ->whereBetween('period_key', [$fromKey, $toKey])
@@ -62,27 +43,29 @@ class ContributionAllocationService
         $allocation = [];
         $carry = 0.0;
         $paidThrough = null;
+        $today = now($tz)->startOfDay();
 
-        // Iterate month-by-month
         $p = $from->copy();
+
         while ($p->lte($to)) {
             $k = $p->format('Y-m');
 
             $posted = (float) ($postedByPeriod[$k] ?? 0);
             $forwardIn = $carry;
-
             $available = $forwardIn + $posted;
 
             $credited = min($available, $required);
-
             $carryOut = max(0.0, $available - $required);
 
-            $status = 'missed';
-            if ($credited + 1e-9 >= $required) $status = 'funded';
-            elseif ($credited > 0) $status = 'partial';
+            $dueDate = $this->dueDateForPeriod($fy, $k, $tz);
 
-            if ($status === 'funded') {
+            if ($credited + 1e-9 >= $required) {
+                $status = 'funded';
                 $paidThrough = $k;
+            } elseif ($today->gt($dueDate)) {
+                $status = 'missed';
+            } else {
+                $status = 'partial';
             }
 
             $allocation[] = [
@@ -93,6 +76,7 @@ class ContributionAllocationService
                 'credited' => round($credited, 2),
                 'status' => $status,
                 'carry_out' => round($carryOut, 2),
+                'due_date' => $dueDate->toDateString(),
             ];
 
             $carry = $carryOut;
@@ -109,5 +93,23 @@ class ContributionAllocationService
             ],
             'allocation' => $allocation,
         ];
+    }
+
+    private function dueDateForPeriod(FinancialYearRule $fy, string $periodKey, string $tz): Carbon
+    {
+        $offset = (int) ($fy->due_month_offset ?? 0);
+        $dueDay = (int) ($fy->due_day ?? 1);
+        $graceDays = (int) ($fy->grace_days ?? 0);
+
+        $dueMonth = Carbon::createFromFormat('Y-m-d', $periodKey . '-01', $tz)
+            ->startOfMonth()
+            ->addMonths($offset);
+
+        $lastDay = $dueMonth->copy()->endOfMonth()->day;
+
+        return $dueMonth
+            ->day(min($dueDay, $lastDay))
+            ->addDays($graceDays)
+            ->startOfDay();
     }
 }
