@@ -16,34 +16,47 @@ class LoanMigrationController extends Controller
         protected LoanMigrationService $loanMigrationService
     ) {}
 
-    /**
-     * Migrate an existing loan into the new system.
-     */
     public function store(Request $request, Loan $loan)
     {
         $user = $request->user();
 
         if (!in_array($user->role, ['admin', 'treasurer'], true)) {
-            return response()->json([
-                'message' => 'Forbidden.'
-            ], 403);
+            return response()->json(['message' => 'Forbidden.'], 403);
         }
 
         $validated = $request->validate([
-            'migration_date' => ['required', 'date'],
+            'issued_date' => ['required', 'date'],
+            'due_date' => ['required', 'date'],
+            'migration_date' => ['nullable', 'date'],
+
             'original_principal' => ['required', 'numeric', 'min:0.01'],
-            'original_total_payable' => ['nullable', 'numeric', 'min:0'],
-            'principal_paid_before_migration' => ['nullable', 'numeric', 'min:0'],
-            'interest_paid_before_migration' => ['nullable', 'numeric', 'min:0'],
+            'number_of_installments' => ['required', 'integer', 'min:1'],
+            'paid_installments' => ['required', 'integer', 'min:0'],
             'outstanding_principal' => ['required', 'numeric', 'min:0'],
-            'outstanding_interest' => ['nullable', 'numeric', 'min:0'],
+            'principal_paid_before_migration' => ['nullable', 'numeric', 'min:0'],
+
             'note' => ['nullable', 'string'],
         ]);
 
         try {
             $snapshot = $this->loanMigrationService->migrateLoan(
                 loan: $loan,
-                data: $validated,
+                data: [
+                    'issued_date' => $validated['issued_date'],
+                    'due_date' => $validated['due_date'],
+                    'migration_date' => $validated['migration_date'] ?? $validated['issued_date'],
+
+                    'original_principal' => round((float) $validated['original_principal'], 2),
+                    'number_of_installments' => (int) $validated['number_of_installments'],
+                    'paid_installments' => (int) $validated['paid_installments'],
+                    'outstanding_principal' => round((float) $validated['outstanding_principal'], 2),
+                    'principal_paid_before_migration' => round(
+                        (float) ($validated['principal_paid_before_migration'] ?? 0),
+                        2
+                    ),
+
+                    'note' => $validated['note'] ?? null,
+                ],
                 createdBy: (int) $user->id
             );
 
@@ -58,36 +71,31 @@ class LoanMigrationController extends Controller
         }
     }
 
-    /**
-     * Create a migrated loan directly from a member.
-     */
     public function storeFromMember(Request $request)
     {
         $user = $request->user();
 
         if (!in_array($user->role, ['admin', 'treasurer'], true)) {
-            return response()->json([
-                'message' => 'Forbidden.'
-            ], 403);
+            return response()->json(['message' => 'Forbidden.'], 403);
         }
 
         $validated = $request->validate([
             'user_id' => ['required', 'integer', 'exists:users,id'],
             'beneficiary_id' => ['nullable', 'integer', 'exists:beneficiaries,id'],
 
-            'migration_date' => ['required', 'date'],
-            'original_principal' => ['required', 'numeric', 'min:0.01'],
-            'original_total_payable' => ['nullable', 'numeric', 'min:0'],
-            'principal_paid_before_migration' => ['nullable', 'numeric', 'min:0'],
-            'interest_paid_before_migration' => ['nullable', 'numeric', 'min:0'],
-            'outstanding_principal' => ['required', 'numeric', 'min:0'],
-            'outstanding_interest' => ['nullable', 'numeric', 'min:0'],
-            'note' => ['nullable', 'string'],
+            'issued_date' => ['required', 'date'],
+            'due_date' => ['required', 'date'],
+            'migration_date' => ['nullable', 'date'],
 
-            'issued_date' => ['nullable', 'date'],
-            'due_date' => ['nullable', 'date'],
+            'original_principal' => ['required', 'numeric', 'min:0.01'],
+            'number_of_installments' => ['required', 'integer', 'min:1'],
+            'paid_installments' => ['required', 'integer', 'min:0'],
+            'outstanding_principal' => ['required', 'numeric', 'min:0'],
+            'principal_paid_before_migration' => ['nullable', 'numeric', 'min:0'],
+
             'duration_months' => ['nullable', 'integer', 'min:1'],
             'repayment_mode' => ['nullable', 'in:once,installment'],
+            'note' => ['nullable', 'string'],
 
             'guarantors' => ['nullable', 'array'],
             'guarantors.*.participant_type' => ['required', 'in:user,beneficiary'],
@@ -101,48 +109,27 @@ class LoanMigrationController extends Controller
                 $member = User::findOrFail($validated['user_id']);
 
                 $originalPrincipal = round((float) $validated['original_principal'], 2);
+                $numberOfInstallments = (int) $validated['number_of_installments'];
+                $paidInstallments = (int) $validated['paid_installments'];
+                $outstandingPrincipal = round((float) $validated['outstanding_principal'], 2);
 
-                $originalTotalPayable = array_key_exists('original_total_payable', $validated)
-                    && $validated['original_total_payable'] !== null
-                    ? round((float) $validated['original_total_payable'], 2)
-                    : $originalPrincipal;
-
-                $principalPaidBeforeMigration = round(
-                    (float) ($validated['principal_paid_before_migration'] ?? 0),
-                    2
-                );
-
-                $interestPaidBeforeMigration = round(
-                    (float) ($validated['interest_paid_before_migration'] ?? 0),
-                    2
-                );
-
-                $outstandingPrincipal = round(
-                    (float) ($validated['outstanding_principal'] ?? 0),
-                    2
-                );
-
-                $outstandingInterest = round(
-                    (float) ($validated['outstanding_interest'] ?? 0),
-                    2
-                );
-
-                $repaymentMode = $validated['repayment_mode'] ?? 'once';
-                $durationMonths = (int) ($validated['duration_months'] ?? 1);
-
-                if ($repaymentMode === 'once') {
-                    $durationMonths = 1;
-                }
-
-                if ($repaymentMode === 'installment' && $durationMonths < 1) {
+                if ($paidInstallments > $numberOfInstallments) {
                     throw new InvalidArgumentException(
-                        'duration_months must be at least 1 for installment loans.'
+                        'paid_installments cannot exceed number_of_installments.'
                     );
                 }
 
-                if ($outstandingInterest > 0) {
+                $principalPaidBeforeMigration = round(
+                    (float) (
+                        $validated['principal_paid_before_migration']
+                        ?? ($originalPrincipal - $outstandingPrincipal)
+                    ),
+                    2
+                );
+
+                if ($principalPaidBeforeMigration < 0) {
                     throw new InvalidArgumentException(
-                        'Outstanding interest must be zero because interest is deducted upfront before disbursement.'
+                        'Principal paid before migration cannot be negative.'
                     );
                 }
 
@@ -158,98 +145,57 @@ class LoanMigrationController extends Controller
                     );
                 }
 
-                $issuedDate = $validated['issued_date'] ?? $validated['migration_date'];
-                $dueDate = $validated['due_date'] ?? $validated['migration_date'];
+                $remainingInstallments = max(0, $numberOfInstallments - $paidInstallments);
+                $durationMonths = (int) ($validated['duration_months'] ?? max(1, $remainingInstallments));
+
+                if ($durationMonths < 1) {
+                    $durationMonths = 1;
+                }
+
+                $monthlyInstallment = $remainingInstallments > 0
+                    ? round($outstandingPrincipal / $remainingInstallments, 2)
+                    : null;
 
                 $loan = Loan::create([
                     'user_id' => $member->id,
                     'beneficiary_id' => $validated['beneficiary_id'] ?? null,
+
                     'principal' => $originalPrincipal,
                     'interest_rate' => 0,
                     'total_payable' => $outstandingPrincipal,
+
                     'duration_months' => $durationMonths,
-                    'issued_date' => $issuedDate,
-                    'due_date' => $dueDate,
+                    'issued_date' => $validated['issued_date'],
+                    'due_date' => $validated['due_date'],
+
                     'status' => $outstandingPrincipal > 0 ? 'active' : 'completed',
-                    'repayment_mode' => $repaymentMode,
-                    'monthly_installment' => $repaymentMode === 'installment'
-                        ? round($outstandingPrincipal / max(1, $durationMonths), 2)
-                        : null,
+                    'repayment_mode' => 'installment',
+                    'monthly_installment' => $monthlyInstallment,
+
                     'approved_by' => $user->id,
                     'is_migrated' => false,
                 ]);
 
-                if (!empty($validated['guarantors'])) {
-                    $seen = [];
-
-                    foreach ($validated['guarantors'] as $g) {
-                        $participantType = $g['participant_type'];
-                        $pledgedAmount = round((float) $g['pledged_amount'], 2);
-
-                        if ($participantType === 'user') {
-                            $guarantorUserId = (int) ($g['guarantor_user_id'] ?? 0);
-
-                            if (!$guarantorUserId) {
-                                throw new InvalidArgumentException('Guarantor member is required.');
-                            }
-
-                            if ($guarantorUserId === (int) $member->id) {
-                                throw new InvalidArgumentException('Borrower cannot guarantee their own loan.');
-                            }
-
-                            $key = 'user:' . $guarantorUserId;
-                            if (in_array($key, $seen, true)) {
-                                throw new InvalidArgumentException('Duplicate guarantors are not allowed.');
-                            }
-
-                            $seen[] = $key;
-
-                            $loan->guarantors()->create([
-                                'participant_type' => 'user',
-                                'guarantor_user_id' => $guarantorUserId,
-                                'beneficiary_id' => null,
-                                'pledged_amount' => $pledgedAmount,
-                                'status' => 'active',
-                            ]);
-                        } else {
-                            $beneficiaryId = (int) ($g['beneficiary_id'] ?? 0);
-
-                            if (!$beneficiaryId) {
-                                throw new InvalidArgumentException('Guarantor beneficiary is required.');
-                            }
-
-                            if ((int) ($validated['beneficiary_id'] ?? 0) === $beneficiaryId) {
-                                throw new InvalidArgumentException('Borrower beneficiary cannot guarantee their own loan.');
-                            }
-
-                            $key = 'beneficiary:' . $beneficiaryId;
-                            if (in_array($key, $seen, true)) {
-                                throw new InvalidArgumentException('Duplicate guarantors are not allowed.');
-                            }
-
-                            $seen[] = $key;
-
-                            $loan->guarantors()->create([
-                                'participant_type' => 'beneficiary',
-                                'guarantor_user_id' => null,
-                                'beneficiary_id' => $beneficiaryId,
-                                'pledged_amount' => $pledgedAmount,
-                                'status' => 'active',
-                            ]);
-                        }
-                    }
-                }
+                $this->createGuarantors(
+                    loan: $loan,
+                    member: $member,
+                    validated: $validated
+                );
 
                 $snapshot = $this->loanMigrationService->migrateLoan(
                     loan: $loan,
                     data: [
-                        'migration_date' => $validated['migration_date'],
+                        'issued_date' => $validated['issued_date'],
+                        'due_date' => $validated['due_date'],
+                        'migration_date' => $validated['migration_date'] ?? $validated['issued_date'],
+
                         'original_principal' => $originalPrincipal,
-                        'original_total_payable' => $originalTotalPayable,
+                        'number_of_installments' => $numberOfInstallments,
+                        'paid_installments' => $paidInstallments,
+
                         'principal_paid_before_migration' => $principalPaidBeforeMigration,
-                        'interest_paid_before_migration' => $interestPaidBeforeMigration,
                         'outstanding_principal' => $outstandingPrincipal,
-                        'outstanding_interest' => $outstandingInterest,
+
                         'note' => $validated['note'] ?? null,
                     ],
                     createdBy: (int) $user->id
@@ -264,6 +210,7 @@ class LoanMigrationController extends Controller
                         'migrationSnapshot',
                         'guarantors.guarantor',
                         'guarantors.beneficiary',
+                        'installments',
                     ]),
                     'snapshot' => $snapshot,
                     'summary' => $summary,
@@ -280,17 +227,85 @@ class LoanMigrationController extends Controller
             ]);
         }
     }
-    /**
-     * Get current outstanding balances for a migrated loan.
-     */
+
+    private function createGuarantors(Loan $loan, User $member, array $validated): void
+    {
+        if (empty($validated['guarantors'])) {
+            return;
+        }
+
+        $seen = [];
+
+        foreach ($validated['guarantors'] as $g) {
+            $participantType = $g['participant_type'];
+            $pledgedAmount = round((float) $g['pledged_amount'], 2);
+
+            if ($participantType === 'user') {
+                $guarantorUserId = (int) ($g['guarantor_user_id'] ?? 0);
+
+                if (!$guarantorUserId) {
+                    throw new InvalidArgumentException('Guarantor member is required.');
+                }
+
+                if ($guarantorUserId === (int) $member->id) {
+                    throw new InvalidArgumentException('Borrower cannot guarantee their own loan.');
+                }
+
+                $key = 'user:' . $guarantorUserId;
+
+                if (in_array($key, $seen, true)) {
+                    throw new InvalidArgumentException('Duplicate guarantors are not allowed.');
+                }
+
+                $seen[] = $key;
+
+                $loan->guarantors()->create([
+                    'participant_type' => 'user',
+                    'guarantor_user_id' => $guarantorUserId,
+                    'beneficiary_id' => null,
+                    'pledged_amount' => $pledgedAmount,
+                    'status' => 'active',
+                ]);
+
+                continue;
+            }
+
+            $beneficiaryId = (int) ($g['beneficiary_id'] ?? 0);
+
+            if (!$beneficiaryId) {
+                throw new InvalidArgumentException('Guarantor beneficiary is required.');
+            }
+
+            if ((int) ($validated['beneficiary_id'] ?? 0) === $beneficiaryId) {
+                throw new InvalidArgumentException(
+                    'Borrower beneficiary cannot guarantee their own loan.'
+                );
+            }
+
+            $key = 'beneficiary:' . $beneficiaryId;
+
+            if (in_array($key, $seen, true)) {
+                throw new InvalidArgumentException('Duplicate guarantors are not allowed.');
+            }
+
+            $seen[] = $key;
+
+            $loan->guarantors()->create([
+                'participant_type' => 'beneficiary',
+                'guarantor_user_id' => null,
+                'beneficiary_id' => $beneficiaryId,
+                'pledged_amount' => $pledgedAmount,
+                'status' => 'active',
+            ]);
+        }
+    }
+
     public function outstanding(Request $request, Loan $loan)
     {
         $user = $request->user();
 
         if (!in_array($user->role, ['admin', 'treasurer'], true)) {
-            return response()->json([
-                'message' => 'Forbidden.'
-            ], 403);
+            return response()->json(['message' => 'Forbidden.'], 403);
         }
 
         try {
@@ -306,17 +321,12 @@ class LoanMigrationController extends Controller
         }
     }
 
-    /**
-     * Get full migration summary for a migrated loan.
-     */
     public function summary(Request $request, Loan $loan)
     {
         $user = $request->user();
 
         if (!in_array($user->role, ['admin', 'treasurer'], true)) {
-            return response()->json([
-                'message' => 'Forbidden.'
-            ], 403);
+            return response()->json(['message' => 'Forbidden.'], 403);
         }
 
         try {
