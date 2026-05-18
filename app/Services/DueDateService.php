@@ -120,6 +120,11 @@ class DueDateService
         // Else amountDue is 0 (fully funded)
         $amountDue = max(0, round($commit - (float) $creditedTowardPeriod, 2));
 
+        dd([
+            'due_day' => $fy->due_day,
+            'offset' => $fy->due_month_offset,
+            'period' => $nextKey,
+        ]);
         // Due date belongs to "due month" = duePeriod + offset
         $dueMonth = $nextDuePeriod->copy()->addMonths($offset);
 
