@@ -66,10 +66,11 @@ class ContributionService
             throw new InvalidArgumentException("Amount cannot be below minimum ({$min}).");
         }
 
-        $paid = Carbon::parse($paidDate, $this->tz)->startOfDay();
+        $actualPaid = Carbon::parse($paidDate, $this->tz)->startOfDay();
         $startPeriodKey = Carbon::createFromFormat('Y-m', $period, $this->tz)->format('Y-m');
 
         $this->assertPeriodInFY($startPeriodKey, $fy);
+        $this->validatePaidDateInFY($actualPaid, $fy);
 
         $remaining = $amount;
         $cursorPeriodKey = $startPeriodKey;
@@ -88,7 +89,13 @@ class ContributionService
                 ? Carbon::parse($expectedDate, $this->tz)->startOfDay()
                 : $this->computeExpectedDateFromFyRule($fy, $cursorPeriodKey);
 
-            $isLate = $paid->gt($expected);
+            $allocationPaidDate = $this->effectivePaidDateForPeriod(
+                periodKey: $cursorPeriodKey,
+                actualPaidDate: $actualPaid,
+                fy: $fy
+            );
+
+            $isLate = $allocationPaidDate->gt($expected);
 
             $envelope = $this->ownerContributionQuery($userId, $beneficiaryId)
                 ->where('financial_year_rule_id', (int) $fy->id)
@@ -129,7 +136,7 @@ class ContributionService
                 'financial_year_rule_id' => (int) $fy->id,
                 'year_key'               => (string) $fy->year_key,
                 'period_key'             => $cursorPeriodKey,
-                'monthly_target'         => $monthlyTarget,
+                'monthly_target'         => round((float) $monthlyTarget, 2),
                 'before_amount'          => round((float) $beforeAmount, 2),
                 'allocated'              => round((float) $alloc, 2),
                 'after_amount'           => round((float) $afterAmount, 2),
@@ -137,7 +144,8 @@ class ContributionService
                 'contribution_id'        => (int) ($envelope?->id ?? 0),
                 'status'                 => $status,
                 'expected_date'          => $expected->toDateString(),
-                'paid_date'              => $paid->toDateString(),
+                'paid_date'              => $allocationPaidDate->toDateString(),
+                'actual_paid_date'       => $actualPaid->toDateString(),
                 'note'                   => $envelope ? 'existing_envelope' : 'would_create_envelope',
             ];
 
@@ -155,7 +163,7 @@ class ContributionService
             'user_id' => $userId,
             'beneficiary_id' => $beneficiaryId,
             'start_period_key' => $startPeriodKey,
-            'paid_date' => $paid->toDateString(),
+            'actual_paid_date' => $actualPaid->toDateString(),
             'expected_date_override' => $expectedDate ?: null,
             'amount' => $amount,
             'allocations' => $allocations,
@@ -216,10 +224,11 @@ class ContributionService
                 throw new InvalidArgumentException("Amount cannot be below minimum ({$min}).");
             }
 
-            $paid = Carbon::parse($paidDate, $this->tz)->startOfDay();
+            $actualPaid = Carbon::parse($paidDate, $this->tz)->startOfDay();
             $startPeriodKey = Carbon::createFromFormat('Y-m', $period, $this->tz)->format('Y-m');
 
             $this->assertPeriodInFY($startPeriodKey, $fy);
+            $this->validatePaidDateInFY($actualPaid, $fy);
 
             $remaining = $amount;
             $cursorPeriodKey = $startPeriodKey;
@@ -232,7 +241,7 @@ class ContributionService
                 ...$this->ownerPayload($userId, $beneficiaryId),
                 'financial_year_rule_id' => (int) $fy->id,
                 'total_amount' => $amount,
-                'paid_date' => $paid->toDateString(),
+                'paid_date' => $actualPaid->toDateString(),
                 'start_period_key' => $startPeriodKey,
                 'batch_ref' => $batchRef,
                 'recorded_by' => $recordedBy,
@@ -252,7 +261,13 @@ class ContributionService
                     ? Carbon::parse($expectedDate, $this->tz)->startOfDay()
                     : $this->computeExpectedDateFromFyRule($fy, $cursorPeriodKey);
 
-                $isLate = $paid->gt($expected);
+                $allocationPaidDate = $this->effectivePaidDateForPeriod(
+                    periodKey: $cursorPeriodKey,
+                    actualPaidDate: $actualPaid,
+                    fy: $fy
+                );
+
+                $isLate = $allocationPaidDate->gt($expected);
 
                 $envelope = $this->ownerContributionQuery($userId, $beneficiaryId)
                     ->where('financial_year_rule_id', (int) $fy->id)
@@ -322,7 +337,7 @@ class ContributionService
                 $status = $isLate ? 'late' : 'paid';
 
                 $envelope->amount = $afterAmount;
-                $envelope->paid_date = $paid;
+                $envelope->paid_date = $allocationPaidDate;
                 $envelope->status = $status;
                 $envelope->recorded_by = $recordedBy;
                 $envelope->save();
@@ -337,7 +352,7 @@ class ContributionService
                         contributionId: $envelope->id,
                         recordedBy: $recordedBy,
                         periodKey: $cursorPeriodKey,
-                        paidDate: $paid->toDateString(),
+                        paidDate: $allocationPaidDate->toDateString(),
                         principalBase: $monthlyTarget
                     );
 
@@ -370,7 +385,7 @@ class ContributionService
                     'before_amount' => $beforeAmount,
                     'after_amount' => $afterAmount,
                     'before_paid_date' => $beforePaidDate,
-                    'after_paid_date' => $paid->toDateString(),
+                    'after_paid_date' => $allocationPaidDate->toDateString(),
                     'before_status' => $beforeStatus,
                     'after_status' => $status,
                     'before_penalty_amount' => $beforePenalty,
@@ -400,7 +415,8 @@ class ContributionService
                     'expected_date' => $envelope->expected_date
                         ? Carbon::parse($envelope->expected_date)->toDateString()
                         : null,
-                    'paid_date' => $paid->toDateString(),
+                    'paid_date' => $allocationPaidDate->toDateString(),
+                    'actual_paid_date' => $actualPaid->toDateString(),
                 ];
 
                 if ($cursorPeriodKey === $startPeriodKey) {
@@ -765,10 +781,11 @@ class ContributionService
                 throw new InvalidArgumentException("Amount cannot be below minimum ({$min}).");
             }
 
-            $paid = Carbon::parse($paidDate, $this->tz)->startOfDay();
+            $actualPaid = Carbon::parse($paidDate, $this->tz)->startOfDay();
             $periodKey = Carbon::createFromFormat('Y-m', $period, $this->tz)->format('Y-m');
 
             $this->assertPeriodInFY($periodKey, $fy);
+            $this->validatePaidDateInFY($actualPaid, $fy);
 
             $commitment = $this->commitmentService->activeForPeriod(
                 userId: $userId,
@@ -788,7 +805,13 @@ class ContributionService
                 ? Carbon::parse($expectedDate, $this->tz)->startOfDay()
                 : $this->computeExpectedDateFromFyRule($fy, $periodKey);
 
-            $isLate = $paid->gt($expected);
+            $allocationPaidDate = $this->effectivePaidDateForPeriod(
+                periodKey: $periodKey,
+                actualPaidDate: $actualPaid,
+                fy: $fy
+            );
+
+            $isLate = $allocationPaidDate->gt($expected);
 
             $envelope = $this->ownerContributionQuery($userId, $beneficiaryId)
                 ->where('financial_year_rule_id', (int) $fy->id)
@@ -819,7 +842,7 @@ class ContributionService
             $status = $isLate ? 'late' : 'paid';
 
             $envelope->amount = $afterAmount;
-            $envelope->paid_date = $paid;
+            $envelope->paid_date = $allocationPaidDate;
             $envelope->status = $status;
             $envelope->recorded_by = $recordedBy;
             $envelope->save();
@@ -843,7 +866,7 @@ class ContributionService
                     contributionId: $envelope->id,
                     recordedBy: $recordedBy,
                     periodKey: $periodKey,
-                    paidDate: $paid->toDateString(),
+                    paidDate: $allocationPaidDate->toDateString(),
                     principalBase: $monthlyTarget
                 );
 
@@ -872,7 +895,8 @@ class ContributionService
                     'status'                 => (string) $envelope->status,
                     'penalty_amount'         => (float) ($envelope->penalty_amount ?? 0),
                     'expected_date'          => $envelope->expected_date ? Carbon::parse($envelope->expected_date)->toDateString() : null,
-                    'paid_date'              => $paid->toDateString(),
+                    'paid_date'              => $allocationPaidDate->toDateString(),
+                    'actual_paid_date'       => $actualPaid->toDateString(),
                 ]],
             ];
         });
@@ -1113,6 +1137,47 @@ class ContributionService
         }
 
         return $expected;
+    }
+
+    /**
+     * Keeps paid dates consistent when one payment is allocated across multiple periods.
+     *
+     * Rule:
+     * - For past/current allocation periods, keep the real payment date.
+     * - For future allocation periods, use the rule-based expected/due date for that period.
+     *
+     * Example:
+     * actualPaidDate = 2026-01-15, amount covers Jan-Apr
+     * Jan paid_date = 2026-01-15
+     * Feb paid_date = computeExpectedDateFromFyRule(Feb)
+     * Mar paid_date = computeExpectedDateFromFyRule(Mar)
+     * Apr paid_date = computeExpectedDateFromFyRule(Apr)
+     */
+    private function effectivePaidDateForPeriod(
+        string $periodKey,
+        Carbon $actualPaidDate,
+        FinancialYearRule $fy
+    ): Carbon {
+        $periodMonth = Carbon::createFromFormat('Y-m-d', $periodKey . '-01', $this->tz)->startOfMonth();
+        $actualPaidMonth = $actualPaidDate->copy()->startOfMonth();
+
+        if ($periodMonth->gt($actualPaidMonth)) {
+            return $this->computeExpectedDateFromFyRule($fy, $periodKey)->startOfDay();
+        }
+
+        return $actualPaidDate->copy()->startOfDay();
+    }
+
+    private function validatePaidDateInFY(Carbon $paidDate, FinancialYearRule $fy): void
+    {
+        $fyStart = Carbon::parse($fy->start_date, $this->tz)->startOfDay();
+        $fyEnd = Carbon::parse($fy->end_date, $this->tz)->endOfDay();
+
+        if ($paidDate->lt($fyStart) || $paidDate->gt($fyEnd)) {
+            throw new InvalidArgumentException(
+                "Paid date {$paidDate->toDateString()} is outside financial year {$fy->year_key}."
+            );
+        }
     }
 
     private function nextPeriodKey(string $periodKey): string
