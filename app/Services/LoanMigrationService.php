@@ -193,13 +193,12 @@ class LoanMigrationService
                 'loan_id' => $loan->id,
                 'installment_no' => $installmentNo,
                 'due_date' => $dueDate->copy()->addMonths($i - 1)->toDateString(),
-
-                'principal_amount' => $amount,
-                'interest_amount' => 0,
-                'total_amount' => $amount,
+                'amount_due' => $amount,
                 'paid_amount' => 0,
-
                 'status' => 'pending',
+                'paid_date' => null,
+                'penalty_applied_at' => null,
+                'penalty_id' => null,
             ]);
         }
     }
