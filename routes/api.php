@@ -82,6 +82,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Members management
         Route::get('/members', [MemberController::class, 'index']);
+        Route::get('/participants/dropdown', [MemberController::class, 'participantsDropdown']);
         Route::post('/members', [MemberController::class, 'store']);
         Route::get('/members/{user}', [MemberController::class, 'show']);
         Route::patch('/members/{user}', [MemberController::class, 'update']);

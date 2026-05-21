@@ -212,6 +212,43 @@ class MemberController extends Controller
 
         return response()->json($page);
     }
+    public function participantsDropdown()
+    {
+        $members = User::query()
+            ->select('id', 'name', 'email', 'phone')
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get()
+            ->map(fn($m) => [
+                'key' => 'user:' . $m->id,
+                'type' => 'user',
+                'user_id' => $m->id,
+                'beneficiary_id' => null,
+                'name' => $m->name,
+                'subtitle' => $m->phone ?? $m->email,
+                'label' => $m->name . ' - Member',
+            ]);
+
+        $beneficiaries = \App\Models\Beneficiary::query()
+            ->with('guardian:id,name,email,phone')
+            ->select('id', 'guardian_user_id', 'name', 'relationship', 'is_active')
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get()
+            ->map(fn($b) => [
+                'key' => 'beneficiary:' . $b->id,
+                'type' => 'beneficiary',
+                'user_id' => $b->guardian_user_id,
+                'beneficiary_id' => $b->id,
+                'name' => $b->name,
+                'subtitle' => 'Guardian: ' . ($b->guardian?->name ?? 'N/A'),
+                'label' => $b->name . ' - Beneficiary',
+            ]);
+
+        return response()->json(
+            $members->concat($beneficiaries)->values()
+        );
+    }
 
     public function store(StoreMemberRequest $request)
     {
@@ -309,10 +346,10 @@ class MemberController extends Controller
     }
 
     public function exportGroupFinancialReport(OpeningBalanceService $openingBalanceService)
-{
-    return Excel::download(
-        new GroupFinancialExport($openingBalanceService),
-        'group_financial_report.xlsx'
-    );
-}
+    {
+        return Excel::download(
+            new GroupFinancialExport($openingBalanceService),
+            'group_financial_report.xlsx'
+        );
+    }
 }
