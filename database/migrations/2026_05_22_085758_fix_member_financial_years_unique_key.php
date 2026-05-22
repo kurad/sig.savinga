@@ -1,35 +1,38 @@
-<?php
-
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
-        Schema::table('member_financial_years', function (Blueprint $table) {
-            $table->dropUnique('member_financial_years_financial_year_rule_id_user_id_unique');
+        Schema::table('loan_guarantors', function (Blueprint $table) {
+            if (!Schema::hasColumn('loan_guarantors', 'participant_type')) {
+                $table->enum('participant_type', ['user', 'beneficiary'])
+                    ->default('user')
+                    ->after('loan_id');
+            }
 
-            $table->unique(
-                ['financial_year_rule_id', 'user_id', 'beneficiary_id'],
-                'mfy_fy_user_beneficiary_unique'
-            );
+            if (!Schema::hasColumn('loan_guarantors', 'beneficiary_id')) {
+                $table->foreignId('beneficiary_id')
+                    ->nullable()
+                    ->after('guarantor_user_id')
+                    ->constrained('beneficiaries')
+                    ->nullOnDelete();
+            }
         });
     }
 
     public function down(): void
     {
-        Schema::table('member_financial_years', function (Blueprint $table) {
-            $table->dropUnique('mfy_fy_user_beneficiary_unique');
+        Schema::table('loan_guarantors', function (Blueprint $table) {
+            if (Schema::hasColumn('loan_guarantors', 'beneficiary_id')) {
+                $table->dropConstrainedForeignId('beneficiary_id');
+            }
 
-            $table->unique(
-                ['financial_year_rule_id', 'user_id'],
-                'member_financial_years_financial_year_rule_id_user_id_unique'
-            );
+            if (Schema::hasColumn('loan_guarantors', 'participant_type')) {
+                $table->dropColumn('participant_type');
+            }
         });
     }
 };
