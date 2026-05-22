@@ -31,34 +31,41 @@ class MemberFinancialYearService
     ): MemberFinancialYear {
         $this->validateOwner($userId, $beneficiaryId);
 
-        try {
-            return DB::transaction(function () use ($userId, $beneficiaryId, $financialYearRuleId) {
-                $mfy = $this->ownerQuery($userId, $beneficiaryId)
-                    ->where('financial_year_rule_id', $financialYearRuleId)
-                    ->lockForUpdate()
-                    ->first();
+        return DB::transaction(function () use (
+            $userId,
+            $beneficiaryId,
+            $financialYearRuleId
+        ) {
+            $mfy = $this->ownerQuery($userId, $beneficiaryId)
+                ->where('financial_year_rule_id', $financialYearRuleId)
+                ->lockForUpdate()
+                ->first();
 
-                if ($mfy) {
-                    return $mfy;
-                }
+            if ($mfy) {
+                return $mfy;
+            }
 
-                $mfy = new MemberFinancialYear([
+            try {
+                return MemberFinancialYear::create([
                     'financial_year_rule_id' => $financialYearRuleId,
                     'user_id' => $userId,
                     'beneficiary_id' => $beneficiaryId,
                     'opening_balance' => 0,
                     'commitment_amount' => 0,
-                ]);
+                ])->fresh();
+            } catch (QueryException $e) {
+                // race condition safety
+                $existing = $this->ownerQuery($userId, $beneficiaryId)
+                    ->where('financial_year_rule_id', $financialYearRuleId)
+                    ->first();
 
-                $mfy->save();
+                if ($existing) {
+                    return $existing;
+                }
 
-                return $mfy->fresh();
-            });
-        } catch (QueryException $e) {
-            return $this->ownerQuery($userId, $beneficiaryId)
-                ->where('financial_year_rule_id', $financialYearRuleId)
-                ->firstOrFail();
-        }
+                throw $e;
+            }
+        });
     }
 
     public function upsertSetup(
