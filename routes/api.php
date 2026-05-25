@@ -101,7 +101,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/reports/group-financial/export', [MemberController::class, 'exportGroupFinancialReport']);
         Route::get('/commitments/by-participant', [CommitmentController::class, 'showByParticipant']);
         Route::put('/commitments/{commitment}', [CommitmentController::class, 'update']);
-
+        Route::post('/commitments/{id}/change', [CommitmentController::class, 'changeCommitment']
+);
         // Contributions (group-level)
         Route::get('/contributions', [ContributionController::class, 'index']);
         Route::post('/contributions', [ContributionController::class, 'store']);

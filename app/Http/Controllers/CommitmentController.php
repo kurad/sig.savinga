@@ -287,4 +287,42 @@ class CommitmentController extends Controller
             'data' => $updated['data']->load($this->commitmentRelations()),
         ]);
     }
+
+    public function changeCommitment(Request $request, $id)
+    {
+        $request->validate([
+            'amount' => ['required', 'numeric', 'min:1'],
+            'effective_from_period' => [
+                'required',
+                'regex:/^\d{4}-(0[1-9]|1[0-2])$/'
+            ],
+        ]);
+
+        $commitment = ContributionCommitment::findOrFail($id);
+
+        // Optional ownership/security check
+        if (
+            auth()->user()->role !== 'admin' &&
+            $commitment->user_id !== auth()->id()
+        ) {
+            return response()->json([
+                'message' => 'Unauthorized'
+            ], 403);
+        }
+
+        $result = $this->commitmentService->changeForFutureMonths(
+            commitment: $commitment,
+            newAmount: $request->amount,
+            effectiveFromPeriod: $request->effective_from_period,
+            createdBy: auth()->id()
+        );
+
+        return response()->json([
+            'message' => $result['message'],
+            'data' => [
+                'old_commitment' => $result['old_commitment'],
+                'new_commitment' => $result['new_commitment'],
+            ]
+        ]);
+    }
 }

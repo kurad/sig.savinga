@@ -8,38 +8,25 @@ return new class extends Migration
 {
     public function up(): void
     {
-        if (!Schema::hasColumn('loan_guarantors', 'participant_type')) {
-            Schema::table('loan_guarantors', function (Blueprint $table) {
-                $table->enum('participant_type', ['user', 'beneficiary'])
-                    ->default('user')
-                    ->after('loan_id');
-            });
-        }
+        Schema::table('member_financial_years', function (Blueprint $table) {
+            $table->dropUnique('member_financial_years_financial_year_rule_id_user_id_unique');
 
-        if (!Schema::hasColumn('loan_guarantors', 'beneficiary_id')) {
-            Schema::table('loan_guarantors', function (Blueprint $table) {
-                $table->foreignId('beneficiary_id')
-                    ->nullable()
-                    ->after('guarantor_user_id')
-                    ->constrained('beneficiaries')
-                    ->nullOnDelete();
-            });
-        }
+            $table->unique(
+                ['financial_year_rule_id', 'user_id', 'beneficiary_id'],
+                'mfy_fy_user_beneficiary_unique'
+            );
+        });
     }
 
     public function down(): void
     {
-        if (Schema::hasColumn('loan_guarantors', 'beneficiary_id')) {
-            Schema::table('loan_guarantors', function (Blueprint $table) {
-                $table->dropForeign(['beneficiary_id']);
-                $table->dropColumn('beneficiary_id');
-            });
-        }
+        Schema::table('member_financial_years', function (Blueprint $table) {
+            $table->dropUnique('mfy_fy_user_beneficiary_unique');
 
-        if (Schema::hasColumn('loan_guarantors', 'participant_type')) {
-            Schema::table('loan_guarantors', function (Blueprint $table) {
-                $table->dropColumn('participant_type');
-            });
-        }
+            $table->unique(
+                ['financial_year_rule_id', 'user_id'],
+                'member_financial_years_financial_year_rule_id_user_id_unique'
+            );
+        });
     }
 };

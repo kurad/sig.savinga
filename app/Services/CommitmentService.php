@@ -481,4 +481,102 @@ class CommitmentService
             ];
         });
     }
+
+    public function changeForFutureMonths(
+        ContributionCommitment $commitment,
+        float $newAmount,
+        string $effectiveFromPeriod,
+        int $createdBy
+    ): array {
+        $this->assertPeriodKey($effectiveFromPeriod);
+
+        $newAmount = round((float) $newAmount, 2);
+
+        if ($newAmount <= 0) {
+            throw ValidationException::withMessages([
+                'amount' => ['Commitment amount must be greater than 0.'],
+            ]);
+        }
+
+        return DB::transaction(function () use (
+            $commitment,
+            $newAmount,
+            $effectiveFromPeriod,
+            $createdBy
+        ) {
+            $commitment = ContributionCommitment::lockForUpdate()->findOrFail($commitment->id);
+
+            if ($commitment->status !== 'active') {
+                throw ValidationException::withMessages([
+                    'commitment' => ['Only active commitments can be changed.'],
+                ]);
+            }
+
+            if ($effectiveFromPeriod <= $commitment->cycle_start_period) {
+                throw ValidationException::withMessages([
+                    'effective_from_period' => [
+                        'Effective period must be after the current commitment start period.',
+                    ],
+                ]);
+            }
+
+            if ($effectiveFromPeriod > $commitment->cycle_end_period) {
+                throw ValidationException::withMessages([
+                    'effective_from_period' => [
+                        'Effective period must be within the current commitment cycle.',
+                    ],
+                ]);
+            }
+
+            $hasFutureContributions = Contribution::query()
+                ->where('user_id', $commitment->user_id)
+                ->when(
+                    $commitment->beneficiary_id !== null,
+                    fn($q) => $q->where('beneficiary_id', $commitment->beneficiary_id),
+                    fn($q) => $q->whereNull('beneficiary_id')
+                )
+                ->where('period_key', '>=', $effectiveFromPeriod)
+                ->where('period_key', '<=', $commitment->cycle_end_period)
+                ->exists();
+
+            if ($hasFutureContributions) {
+                throw ValidationException::withMessages([
+                    'effective_from_period' => [
+                        'You cannot change the commitment from this period because contributions already exist for this period or later.',
+                    ],
+                ]);
+            }
+
+            $oldCycleEnd = $commitment->cycle_end_period;
+
+            $previousPeriod = Carbon::createFromFormat('Y-m', $effectiveFromPeriod)
+                ->startOfMonth()
+                ->subMonthNoOverflow()
+                ->format('Y-m');
+
+            // Shorten old commitment so it only covers past months
+            $commitment->update([
+                'cycle_end_period' => $previousPeriod,
+            ]);
+
+            // Create new commitment for future months
+            $newCommitment = ContributionCommitment::create([
+                'user_id' => $commitment->user_id,
+                'beneficiary_id' => $commitment->beneficiary_id,
+                'amount' => $newAmount,
+                'cycle_start_period' => $effectiveFromPeriod,
+                'cycle_end_period' => $oldCycleEnd,
+                'cycle_months' => $commitment->cycle_months,
+                'status' => 'active',
+                'activated_at' => now('Africa/Kigali'),
+                'created_by' => $createdBy,
+            ]);
+
+            return [
+                'message' => 'Commitment changed successfully for future months only.',
+                'old_commitment' => $commitment->fresh(),
+                'new_commitment' => $newCommitment,
+            ];
+        });
+    }
 }
