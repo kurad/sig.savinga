@@ -54,6 +54,15 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
 
                 $validator = Validator::make($data, [
                     'member_id' => ['required', 'integer', 'exists:users,id'],
+                    'member_name' => ['required', 'string'],
+
+                    'guarantor_1_id' => ['nullable', 'integer', 'exists:users,id'],
+                    'guarantor_1_name' => ['nullable', 'string'],
+                    'guarantor_1_amount' => ['nullable', 'numeric', 'min:0.01'],
+
+                    'guarantor_2_id' => ['nullable', 'integer', 'exists:users,id'],
+                    'guarantor_2_name' => ['nullable', 'string'],
+                    'guarantor_2_amount' => ['nullable', 'numeric', 'min:0.01'],
 
                     'original_principal' => ['required', 'numeric', 'min:0.01'],
                     'number_of_installments' => ['required', 'integer', 'min:1', 'max:12'],
@@ -69,6 +78,22 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
 
                 if ($validator->fails()) {
                     $this->addError($rowNumber, $data, $validator->errors()->all());
+                    continue;
+                }
+
+                $member = User::query()
+                    ->select('id', 'name')
+                    ->find($data['member_id']);
+
+                if (!$member) {
+                    $this->addError($rowNumber, $data, ['Member was not found.']);
+                    continue;
+                }
+
+                if (trim((string) $member->name) !== trim((string) $data['member_name'])) {
+                    $this->addError($rowNumber, $data, [
+                        'Member name does not match the system record. Please download a fresh template.',
+                    ]);
                     continue;
                 }
 
@@ -96,13 +121,6 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
                     continue;
                 }
 
-                $member = User::find($data['member_id']);
-
-                if (! $member) {
-                    $this->addError($rowNumber, $data, ['Member was not found.']);
-                    continue;
-                }
-
                 $existingActiveLoan = Loan::query()
                     ->where('user_id', $member->id)
                     ->whereIn('status', ['pending', 'approved', 'active'])
@@ -115,6 +133,8 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
                     continue;
                 }
 
+                $guarantors = $this->guarantorsFromRow($data, (int) $member->id);
+
                 DB::transaction(function () use (
                     $member,
                     $data,
@@ -122,7 +142,8 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
                     $numberOfInstallments,
                     $paidInstallments,
                     $outstandingPrincipal,
-                    $principalPaidBeforeMigration
+                    $principalPaidBeforeMigration,
+                    $guarantors
                 ) {
                     $remainingInstallments = max(0, $numberOfInstallments - $paidInstallments);
 
@@ -151,6 +172,16 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
                         'approved_by' => $this->createdBy,
                         'is_migrated' => false,
                     ]);
+
+                    foreach ($guarantors as $g) {
+                        $loan->guarantors()->create([
+                            'participant_type' => 'user',
+                            'guarantor_user_id' => $g['guarantor_user_id'],
+                            'beneficiary_id' => null,
+                            'pledged_amount' => $g['pledged_amount'],
+                            'status' => 'active',
+                        ]);
+                    }
 
                     $this->loanMigrationService->migrateLoan(
                         loan: $loan,
@@ -185,8 +216,14 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
         return [
             'member_id' => $row['member_id'] ?? null,
             'member_name' => $row['member_name'] ?? null,
-            'phone' => $row['phone'] ?? null,
-            'email' => $row['email'] ?? null,
+
+            'guarantor_1_id' => $row['guarantor_1_id'] ?? null,
+            'guarantor_1_name' => $row['guarantor_1_name'] ?? null,
+            'guarantor_1_amount' => $row['guarantor_1_amount'] ?? null,
+
+            'guarantor_2_id' => $row['guarantor_2_id'] ?? null,
+            'guarantor_2_name' => $row['guarantor_2_name'] ?? null,
+            'guarantor_2_amount' => $row['guarantor_2_amount'] ?? null,
 
             'original_principal' => $row['original_principal'] ?? null,
             'number_of_installments' => $row['number_of_installments'] ?? null,
@@ -201,9 +238,66 @@ class LoanMigrationImport implements ToArray, WithHeadingRow
         ];
     }
 
+    protected function guarantorsFromRow(array $data, int $borrowerId): array
+    {
+        $guarantors = [];
+        $seen = [];
+
+        for ($i = 1; $i <= 2; $i++) {
+            $id = $data["guarantor_{$i}_id"] ?? null;
+            $name = $data["guarantor_{$i}_name"] ?? null;
+            $amount = $data["guarantor_{$i}_amount"] ?? null;
+
+            if (!$id && !$amount) {
+                continue;
+            }
+
+            if (!$id && $amount) {
+                throw new InvalidArgumentException("Guarantor {$i} ID is required when amount is filled.");
+            }
+
+            if ($id && !$amount) {
+                continue;
+            }
+
+            $guarantor = User::query()
+                ->select('id', 'name')
+                ->find($id);
+
+            if (!$guarantor) {
+                throw new InvalidArgumentException("Guarantor {$i} was not found.");
+            }
+
+            if ((int) $guarantor->id === (int) $borrowerId) {
+                throw new InvalidArgumentException("Borrower cannot guarantee their own loan.");
+            }
+
+            if (trim((string) $name) !== trim((string) $guarantor->name)) {
+                throw new InvalidArgumentException(
+                    "Guarantor {$i} name does not match the system record. Please download a fresh template."
+                );
+            }
+
+            $key = 'user:' . $guarantor->id;
+
+            if (in_array($key, $seen, true)) {
+                throw new InvalidArgumentException('Duplicate guarantors are not allowed.');
+            }
+
+            $seen[] = $key;
+
+            $guarantors[] = [
+                'guarantor_user_id' => (int) $guarantor->id,
+                'pledged_amount' => round((float) $amount, 2),
+            ];
+        }
+
+        return $guarantors;
+    }
+
     protected function dateValue($value): ?string
     {
-        if (! $value) {
+        if (!$value) {
             return null;
         }
 

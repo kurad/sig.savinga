@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Exports\LoanMigrationTemplateExport;
+use App\Imports\LoanMigrationImport;
 use App\Models\Loan;
 use App\Models\User;
 use App\Services\LoanMigrationService;
@@ -9,9 +11,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
-use App\Imports\LoanMigrationImport;
 use Maatwebsite\Excel\Facades\Excel;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class LoanMigrationController extends Controller
 {
@@ -344,60 +344,18 @@ class LoanMigrationController extends Controller
             ]);
         }
     }
-    public function template(): StreamedResponse
+    public function template(Request $request)
     {
-        $headers = [
-            'member_id',
-            'member_name',
-            'phone',
-            'email',
+        $user = $request->user();
 
-            'original_principal',
-            'number_of_installments',
-            'paid_installments',
-            'outstanding_principal',
+        if (!in_array($user->role, ['admin', 'treasurer'], true)) {
+            return response()->json(['message' => 'Forbidden.'], 403);
+        }
 
-            'issued_date',
-            'due_date',
-            'migration_date',
-
-            'note',
-        ];
-
-        $members = User::query()
-            ->select('id', 'name', 'phone', 'email')
-            ->orderBy('name')
-            ->get();
-
-        return response()->streamDownload(function () use ($headers, $members) {
-            $out = fopen('php://output', 'w');
-
-            fputcsv($out, $headers);
-
-            foreach ($members as $member) {
-                fputcsv($out, [
-                    $member->id,
-                    $member->name,
-                    $member->phone,
-                    $member->email,
-
-                    '',
-                    '',
-                    '',
-                    '',
-
-                    '',
-                    '',
-                    '',
-
-                    '',
-                ]);
-            }
-
-            fclose($out);
-        }, 'loan_migration_template.csv', [
-            'Content-Type' => 'text/csv',
-        ]);
+        return Excel::download(
+            new LoanMigrationTemplateExport(),
+            'loan_migration_template.xlsx'
+        );
     }
     public function import(Request $request)
     {
@@ -408,7 +366,7 @@ class LoanMigrationController extends Controller
         }
 
         $request->validate([
-            'file' => ['required', 'file', 'mimes:xlsx,xls,csv', 'max:10240'],
+            'file' => ['required', 'file', 'mimes:xlsx,xls', 'max:10240'],
         ]);
 
         $import = app(LoanMigrationImport::class);
