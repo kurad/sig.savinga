@@ -18,6 +18,7 @@ class ContributionBatch extends Model
         'total_amount',
         'paid_date',
         'start_period_key',
+        'batch_ref',
         'recorded_by',
         'reversed_at',
         'reversed_by',

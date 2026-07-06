@@ -60,4 +60,8 @@ class Beneficiary extends Model
     {
         return $this->hasMany(ContributionCommitment::class);
     }
+    public function beneficiary()
+    {
+        return $this->belongsTo(Beneficiary::class);
+    }
 }

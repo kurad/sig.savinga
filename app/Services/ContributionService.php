@@ -12,9 +12,12 @@ use App\Models\MemberFinancialYear;
 use App\Models\Penalty;
 use App\Models\SystemRule;
 use App\Models\Transaction;
+use App\Models\User;
+use App\Notifications\ContributionAddedNotification;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
@@ -436,7 +439,7 @@ class ContributionService
                 ->firstOrFail())
                 ->refresh();
 
-            return [
+            $result = [
                 'batch_id' => (int) $batch->id,
                 'batch_ref' => $batchRef,
                 'financial_year_rule_id' => (int) $fy->id,
@@ -444,6 +447,15 @@ class ContributionService
                 'start' => $start,
                 'allocations' => $allocations,
             ];
+
+            DB::afterCommit(function () use ($userId, $batch, $allocations) {
+                $this->sendContributionAddedEmail(
+                    userId: $userId,
+                    batchId: (int) $batch->id,
+                    allocations: $allocations
+                );
+            });
+            return $result;
         });
     }
 
@@ -799,7 +811,7 @@ class ContributionService
                 );
             }
 
-            $monthlyTarget = (float) $commitment->amount;
+            $monthlyTarget = round((float) $commitment->amount, 2);
 
             $expected = $expectedDate
                 ? Carbon::parse($expectedDate, $this->tz)->startOfDay()
@@ -819,6 +831,8 @@ class ContributionService
                 ->lockForUpdate()
                 ->first();
 
+            $createdNew = false;
+
             if (!$envelope) {
                 $envelope = Contribution::create([
                     ...$this->ownerPayload($userId, $beneficiaryId),
@@ -831,15 +845,38 @@ class ContributionService
                     'penalty_amount' => 0,
                     'recorded_by' => $recordedBy,
                 ]);
+
+                $createdNew = true;
             } else {
                 if (!$envelope->expected_date) {
                     $envelope->expected_date = $expected;
                 }
             }
 
-            $beforeAmount = (float) $envelope->amount;
-            $afterAmount = $beforeAmount + $amount;
+            $beforeAmount = round((float) $envelope->amount, 2);
+            $beforePaidDate = $envelope->paid_date
+                ? Carbon::parse($envelope->paid_date)->toDateString()
+                : null;
+            $beforeStatus = (string) ($envelope->status ?? 'paid');
+            $beforePenalty = round((float) ($envelope->penalty_amount ?? 0), 2);
+            $beforeExpectedDate = $envelope->expected_date
+                ? Carbon::parse($envelope->expected_date)->toDateString()
+                : null;
+            $beforeRecordedBy = (int) ($envelope->recorded_by ?? $recordedBy);
+
+            $afterAmount = round($beforeAmount + $amount, 2);
+            $remainingNeededAfter = round(max(0, $monthlyTarget - $afterAmount), 2);
             $status = $isLate ? 'late' : 'paid';
+
+            $batch = ContributionBatch::create([
+                ...$this->ownerPayload($userId, $beneficiaryId),
+                'financial_year_rule_id' => (int) $fy->id,
+                'total_amount' => $amount,
+                'paid_date' => $actualPaid->toDateString(),
+                'start_period_key' => $periodKey,
+                'batch_ref' => (string) Str::uuid(),
+                'recorded_by' => $recordedBy,
+            ]);
 
             $envelope->amount = $afterAmount;
             $envelope->paid_date = $allocationPaidDate;
@@ -847,19 +884,10 @@ class ContributionService
             $envelope->recorded_by = $recordedBy;
             $envelope->save();
 
-            $this->ledger->record(
-                type: 'contribution',
-                debit: 0,
-                credit: $amount,
-                userId: $userId,
-                reference: 'Contribution (FY ' . $fy->year_key . ', Period ' . $periodKey . ') ID ' . $envelope->id,
-                createdBy: $recordedBy,
-                sourceType: 'contribution',
-                sourceId: $envelope->id,
-                beneficiaryId: $beneficiaryId
-            );
+            $penaltyAppliedNow = false;
+            $penaltyAmountAfter = round((float) ($envelope->penalty_amount ?? 0), 2);
 
-            if ($isLate && (float) ($envelope->penalty_amount ?? 0) <= 0) {
+            if ($isLate && $beforePenalty <= 0) {
                 $penalty = $this->penaltyService->contributionLate(
                     userId: $userId,
                     beneficiaryId: $beneficiaryId,
@@ -873,31 +901,81 @@ class ContributionService
                 if ($penalty && (float) $penalty->amount > 0) {
                     $envelope->penalty_amount = (float) $penalty->amount;
                     $envelope->save();
+                    $penaltyAppliedNow = true;
+                    $penaltyAmountAfter = round((float) $envelope->penalty_amount, 2);
                 }
             }
 
-            $remainingNeededAfter = max(0, $monthlyTarget - $afterAmount);
+            $tx = $this->ledger->record(
+                type: 'contribution',
+                debit: 0,
+                credit: $amount,
+                userId: $userId,
+                reference: "[BATCH:{$batch->id}] Contribution Allocation (FY {$fy->year_key}, Period {$periodKey}) ID {$envelope->id}",
+                createdBy: $recordedBy,
+                sourceType: 'contribution',
+                sourceId: $envelope->id,
+                beneficiaryId: $beneficiaryId
+            );
+
+            ContributionAllocation::create([
+                'contribution_batch_id' => $batch->id,
+                'contribution_id' => $envelope->id,
+                'transaction_id' => $tx->id ?? null,
+                'period_key' => $periodKey,
+                'allocated_amount' => $amount,
+                'before_amount' => $beforeAmount,
+                'after_amount' => $afterAmount,
+                'before_paid_date' => $beforePaidDate,
+                'after_paid_date' => $allocationPaidDate->toDateString(),
+                'before_status' => $beforeStatus,
+                'after_status' => $status,
+                'before_penalty_amount' => $beforePenalty,
+                'after_penalty_amount' => $penaltyAmountAfter,
+                'before_expected_date' => $beforeExpectedDate,
+                'after_expected_date' => $envelope->expected_date
+                    ? Carbon::parse($envelope->expected_date)->toDateString()
+                    : null,
+                'before_recorded_by' => $beforeRecordedBy,
+                'after_recorded_by' => $recordedBy,
+                'created_new' => $createdNew,
+                'penalty_applied_now' => $penaltyAppliedNow,
+            ]);
+
+            $allocations = [[
+                'financial_year_rule_id' => (int) $fy->id,
+                'year_key'               => (string) $fy->year_key,
+                'period_key'             => $periodKey,
+                'monthly_target'         => $monthlyTarget,
+                'before_amount'          => round((float) $beforeAmount, 2),
+                'allocated'              => round((float) $amount, 2),
+                'after_amount'           => round((float) $afterAmount, 2),
+                'remaining_needed_after' => round((float) $remainingNeededAfter, 2),
+                'contribution_id'        => (int) $envelope->id,
+                'status'                 => (string) $envelope->status,
+                'penalty_amount'         => (float) ($envelope->penalty_amount ?? 0),
+                'expected_date'          => $envelope->expected_date
+                    ? Carbon::parse($envelope->expected_date)->toDateString()
+                    : null,
+                'paid_date'              => $allocationPaidDate->toDateString(),
+                'actual_paid_date'       => $actualPaid->toDateString(),
+            ]];
+
+            DB::afterCommit(function () use ($userId, $batch, $allocations) {
+                $this->sendContributionAddedEmail(
+                    userId: $userId,
+                    batchId: (int) $batch->id,
+                    allocations: $allocations
+                );
+            });
 
             return [
+                'batch_id' => (int) $batch->id,
+                'batch_ref' => $batch->batch_ref,
                 'financial_year_rule_id' => (int) $fy->id,
                 'year_key' => (string) $fy->year_key,
                 'start' => $envelope->refresh(),
-                'allocations' => [[
-                    'financial_year_rule_id' => (int) $fy->id,
-                    'year_key'               => (string) $fy->year_key,
-                    'period_key'             => $periodKey,
-                    'monthly_target'         => $monthlyTarget,
-                    'before_amount'          => round((float) $beforeAmount, 2),
-                    'allocated'              => round((float) $amount, 2),
-                    'after_amount'           => round((float) $afterAmount, 2),
-                    'remaining_needed_after' => round((float) $remainingNeededAfter, 2),
-                    'contribution_id'        => (int) $envelope->id,
-                    'status'                 => (string) $envelope->status,
-                    'penalty_amount'         => (float) ($envelope->penalty_amount ?? 0),
-                    'expected_date'          => $envelope->expected_date ? Carbon::parse($envelope->expected_date)->toDateString() : null,
-                    'paid_date'              => $allocationPaidDate->toDateString(),
-                    'actual_paid_date'       => $actualPaid->toDateString(),
-                ]],
+                'allocations' => $allocations,
             ];
         });
     }
@@ -1236,7 +1314,6 @@ class ContributionService
 
         return $query;
     }
-
     private function ownerPayload(int $userId, ?int $beneficiaryId): array
     {
         $this->validateOwner($userId, $beneficiaryId);
@@ -1245,5 +1322,33 @@ class ContributionService
             'user_id' => $userId,
             'beneficiary_id' => $beneficiaryId,
         ];
+    }
+
+    private function sendContributionAddedEmail(
+        int $userId,
+        int $batchId,
+        array $allocations = []
+    ): void {
+        try {
+            $user = User::find($userId);
+
+            if (!$user || !$user->email) {
+                return;
+            }
+
+            $batch = ContributionBatch::find($batchId);
+
+            if (!$batch) {
+                return;
+            }
+
+            $user->notify(new ContributionAddedNotification($batch, $allocations));
+        } catch (\Throwable $e) {
+            Log::error('Failed to send contribution added email.', [
+                'user_id' => $userId,
+                'batch_id' => $batchId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 }
