@@ -23,7 +23,7 @@ class ContributionAddedNotification extends Notification
 
     public function toMail(object $notifiable): MailMessage
     {
-        $appUrl = config('app.frontend_url', config('app.url'));
+        $appUrl = rtrim(config('app.frontend_url', config('app.url')), '/');
 
         $periods = collect($this->allocations)
             ->pluck('period_key')
